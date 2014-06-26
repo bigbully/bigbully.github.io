@@ -5,7 +5,7 @@ layout: home
 <div class="index-content blog">
     <div class="section">
         <ul class="artical-cate">
-            <li class="on"><a href="/"><span>Concurrency</span></a></li>
+            <li class="on" style="float:left"><a href="/"><span>Concurrency</span></a></li>
             <li style="float:left"><a href="/scala"><span>Scala</span></a></li>
             <li style="float:left"><a href="/spark"><span>Spark</span></a></li>
         </ul>
