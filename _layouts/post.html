@@ -53,23 +53,23 @@ layout: default
     </div>
 
     <div class="sidenav">
-        <h2>Blog</h2>
+        <h2>Concurrency</h2>
         <ul class="artical-list">
-        {% for post in site.categories.blog%}
+        {% for post in site.categories.concurrency%}
             <li><a href="{{ post.url }}">{{ post.title }}</a></li>
         {% endfor %}
         </ul>
 
-        <h2>Opinion</h2>
+        <h2>Scala</h2>
         <ul class="artical-list">
-        {% for post in site.categories.opinion%}
+        {% for post in site.categories.scala%}
             <li><a href="{{ post.url }}">{{ post.title }}</a></li>
         {% endfor %}
         </ul>
 
-        <h2>Project</h2>
+        <h2>Spark</h2>
         <ul class="artical-list">
-        {% for post in site.categories.project%}
+        {% for post in site.categories.spark%}
             <li><a href="{{ post.url }}">{{ post.title }}</a></li>
         {% endfor %}
         </ul>
