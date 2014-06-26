@@ -7,7 +7,7 @@ layout: home
         <ul class="artical-cate">
             <li><a href="/" style="text-align:left"><span>Concurrency</span></a></li>
             <li style="text-align:left"><a href="/scala"><span>Scala</span></a></li>
-            <li class="on" style="text-align:left"><a href="/Spark"><span>Spark</span></a></li>
+            <li class="on" style="text-align:left"><a href="/spark"><span>Spark</span></a></li>
         </ul>
 
         <div class="cate-bar"><span id="cateBar"></span></div>
