@@ -6,8 +6,8 @@ layout: home
     <div class="section">
         <ul class="artical-cate">
             <li class="on"><a href="/"><span>Concurrency</span></a></li>
-            <li style="float:left"><a href="/scala"><span>Opinion</span></a></li>
-            <li style="float:left"><a href="/spring"><span>Project</span></a></li>
+            <li style="float:left"><a href="/scala"><span>Scala</span></a></li>
+            <li style="float:left"><a href="/spark"><span>Spark</span></a></li>
         </ul>
 
         <div class="cate-bar"><span id="cateBar"></span></div>
