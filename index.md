@@ -2,7 +2,7 @@
 layout: home
 ---
 
-<div class="index-content blog">
+<div class="index-content concurrency">
     <div class="section">
         <ul class="artical-cate">
             <li class="on" style="float:left"><a href="/"><span>Concurrency</span></a></li>

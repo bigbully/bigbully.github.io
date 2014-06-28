@@ -2,7 +2,7 @@
 layout: home
 ---
 
-<div class="index-content opinion">
+<div class="index-content scala">
     <div class="section">
         <ul class="artical-cate">
             <li><a href="/" style="text-align:left"><span>Concurrency</span></a></li>
