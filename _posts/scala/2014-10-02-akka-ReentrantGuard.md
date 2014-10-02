@@ -1,3 +1,10 @@
+---
+layout: post
+title: akka-ReentrantGuard笔记
+description: 
+category: scala
+---
+
 akka2.3.6
 
 在读akka源码时看到一种使用可重入锁的方式：ReentrantGuard，忍不住记在这里。因为传统try-finally的使用方式太反人类了！

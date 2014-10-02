@@ -1,3 +1,10 @@
+---
+layout: post
+title: akka-actorSystem笔记
+description: 
+category: scala
+---
+
 akka2.3.6
 
 这次研究的内容是ActorSystem，要知道进入akka世界的入口就是创建一个ActorSystem，比如

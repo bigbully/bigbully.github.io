@@ -2,7 +2,7 @@
 layout: post
 title: LiveListenerBus源码阅读
 description: 
-category: spark
+category: scala
 ---
 
 非常幸运在公司争取到一个阅读spark源码的机会，也就是利用工作时间阅读spark源码。大致看了看，觉得spark源码的可读性很高，注释写的很详细，而且用了很多scala的特性，这点上比kafka强了不少。

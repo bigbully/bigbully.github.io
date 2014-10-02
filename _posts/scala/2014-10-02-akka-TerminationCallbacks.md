@@ -1,3 +1,11 @@
+---
+layout: post
+title: akka-TerminationCallbacks笔记
+description: 
+category: scala
+---
+
+
 akka2.3.6
 
 在看akka源码时注意到一个很巧妙的设计，actorSystem关闭时，众多回调函数一并执行的操作。
