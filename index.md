@@ -5,8 +5,8 @@ layout: home
 <div class="index-content concurrency">
     <div class="section">
         <ul class="artical-cate">
-            <li class="on" style="float:left"><a href="/"><span>Concurrency</span></a></li>
-            <li style="float:left"><a href="/scala"><span>Scala</span></a></li>
+            <li class="on" style="text-align:left"><a href="/"><span>Concurrency</span></a></li>
+            <li style="text-align:left"><a href="/scala"><span>Scala</span></a></li>
         </ul>
 
         <div class="cate-bar"><span id="cateBar"></span></div>
