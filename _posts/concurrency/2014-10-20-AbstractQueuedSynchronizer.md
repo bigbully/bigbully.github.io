@@ -76,7 +76,7 @@ CountDownLatch
         this.sync = new Sync(count);
     }
 
-在构造函数中创建了一个同步器Sync.这个sync继承了AbstractQueuedSynchronizer, 并完成了CountDownLatch的所有工作.
+在构造函数中创建了一个同步器Sync。这个sync继承了AbstractQueuedSynchronizer，并完成了CountDownLatch的所有工作。
 
 	private static final class Sync extends AbstractQueuedSynchronizer {
         private static final long serialVersionUID = 4982264981922014374L;
@@ -106,11 +106,11 @@ CountDownLatch
         }
     }
 	
-从源码中可以看到由CountDownLatch的构造函数传入的count被设置为sync的state,state在AbstractQueuedSynchronizer内部是volatile修饰的,它的状态改变对所有线程可见.
+从源码中可以看到由CountDownLatch的构造函数传入的count被设置为sync的state，state在AbstractQueuedSynchronizer内部是volatile修饰的，它的状态改变对所有线程可见。
 
-AbstractQueuedSynchronizer会强制他的子类实现tryAcquire(或tryAcquireShared),tryRelease(或tryReleaseShared)方法,从名称上可以看出,分别代表独占式和共享式.在这里CountDownLatch的Sync是共享式的同步器.
+AbstractQueuedSynchronizer会强制他的子类实现tryAcquire(或tryAcquireShared)，tryRelease(或tryReleaseShared)方法，从名称上可以看出，分别代表独占式和共享式.在这里CountDownLatch的Sync是共享式的同步器。
 
-先看一下CountDownLatch的await方法是如何实现的.当某个线程CountDownLatch调用await方法时,会在这里阻塞,等待CountDownLatch调用countDown方法的次数超过count值,才被唤醒.
+先看一下CountDownLatch的await方法是如何实现的。当某个线程CountDownLatch调用await方法时，会在这里阻塞，等待CountDownLatch调用countDown方法的次数超过count值，才被唤醒。
 	
 	public void await() throws InterruptedException {
         sync.acquireSharedInterruptibly(1);
@@ -123,12 +123,12 @@ AbstractQueuedSynchronizer会强制他的子类实现tryAcquire(或tryAcquireSha
             doAcquireSharedInterruptibly(arg);
     }
 
-acquireSharedInterruptibly方法是在AbstractQueuedSynchronizer已经实现好的.首先他会检查当前线程是否已经被中断, 然后调用用户自行实现的tryAcquireShared方法检查是否满足状态,tryAcquireShared方法的返回值为int类型.方法规定:
+acquireSharedInterruptibly方法是在AbstractQueuedSynchronizer已经实现好的。首先他会检查当前线程是否已经被中断，然后调用用户自行实现的tryAcquireShared方法检查是否满足状态，tryAcquireShared方法的返回值为int类型。方法规定:
 
 >**返回值**
 
-> - 大于0.表示本次尝试获取锁成功,并且后续的其他线程再次尝试获取锁仍然有可能成功(后续的其他线程需要去检查是否能获取锁)
-> - 等于0.表示本次尝试成功,但后续的其他线程不会成功获取锁.
+> - 大于0.表示本次尝试获取锁成功，并且后续的其他线程再次尝试获取锁仍然有可能成功(后续的其他线程需要去检查是否能获取锁)
+> - 等于0.表示本次尝试成功，但后续的其他线程不会成功获取锁
 > - 小于0.表示本次尝试失败.
 
 再来看一下CountDownLatch实现的tryAcquireShared方法体:
@@ -137,46 +137,130 @@ acquireSharedInterruptibly方法是在AbstractQueuedSynchronizer已经实现好�
             return getState() == 0? 1 : -1;
     }
 
-可以看到只有getState(),也就是构造函数中的count值为0时,才会返回1,即能够获取锁,并且后续的其他线程再次尝试获取锁仍然有可能成功.反之,则失败.
+可以看到只有getState()，也就是构造函数中的count值为0时，才会返回1，即能够获取锁，并且后续的其他线程再次尝试获取锁仍然有可能成功。反之，则失败。
 
-当CountDownLatch从未countDown过,自然在await时会失败,继而调用doAcquireSharedInterruptibly方法.
+当CountDownLatch从未countDown过，自然在await时会失败，继而调用doAcquireSharedInterruptibly方法。
 
 	private void doAcquireSharedInterruptibly(int arg)
         throws InterruptedException {
         final Node node = addWaiter(Node.SHARED);
+        boolean failed = true;
         try {
             for (;;) {
                 final Node p = node.predecessor();
                 if (p == head) {
                     int r = tryAcquireShared(arg);
-                    if (r >= 0) {
-                        setHeadAndPropagate(node, r);
+                    if (r >= 0) {              
+                        setHeadAndPropagate(node, r);//把自己设置为head节点并唤醒后继节点
                         p.next = null; // help GC
+                        failed = false;
                         return;
                     }
                 }
                 if (shouldParkAfterFailedAcquire(p, node) &&
                     parkAndCheckInterrupt())
-                    break;
+                    throw new InterruptedException();
             }
-        } catch (RuntimeException ex) {
-            cancelAcquire(node);
-            throw ex;
+        } finally {
+            if (failed)
+                cancelAcquire(node);
         }
-        // Arrive here only if interrupted
-        cancelAcquire(node);
-        throw new InterruptedException();
     }
 
 认真分析一下这个方法.
 
  1. 首先创建共享类型的node并加入到FIFO队列中
  2. 获取node的前驱节点p
- 3. 如果前驱节点p为队列头,则再次尝试获取锁tryAcquireShared
- 4. 如果获取锁成功,则执行setHeadAndPropagate,用来把当前node设置为头结点,并向后传播自己获取锁成功的信息.这里需要详细解释一下为什么要向后传播.还记得之前提到过的共享模式定义吗?
+ 3. 如果前驱节点p为head节点，即当前节点很有可能能获得锁，则再次尝试获取锁tryAcquireShared
+ 4. 如果获取锁成功,则执行setHeadAndPropagate,用来把当前node设置为head结点,并向后传播自己获取锁成功的信息.
+ 5. 如果前驱节点p不是head节点，或者p虽然是head节点，但当前节点没有成功获得锁。则检查是否需要让线程等待（park），如果需要，则进入等待状态。
+ 6. 在当前线程被唤醒后，查看是否是因为中断而被唤醒的。如果是因为中断被唤醒的，直接中断，并在finally中取消这次获取锁的操作（cancelAcquire），即从队列中删除当前节点，并顺便从队列中剔除已经cancel的节点，如果需要，唤醒当前节点的后继节点。
 
-Welcome to StackEdit!
-===================
+再来看看addWaiter方法：
+
+	private Node addWaiter(Node mode) {
+        Node node = new Node(Thread.currentThread(), mode);
+        // Try the fast path of enq; backup to full enq on failure
+        Node pred = tail;
+        if (pred != null) {
+            node.prev = pred;
+            if (compareAndSetTail(pred, node)) {
+                pred.next = node;
+                return node;
+            }
+        }
+        enq(node);
+        return node;
+    }
+
+
+	private Node enq(final Node node) {
+        for (;;) {
+            Node t = tail;
+            if (t == null) { // Must initialize
+                if (compareAndSetHead(new Node()))
+                    tail = head;
+            } else {
+                node.prev = t;
+                if (compareAndSetTail(t, node)) {
+                    t.next = node;
+                    return t;
+                }
+            }
+        }
+    }
+
+上面两个方法可以合在一起看
+
+ 1. addWaiter时首先迅速判断一下队列是不是已经建立好了，即tail节点是不是已经存在了，如果存在，则把当前节点加到队列末尾。
+ 2. 如果不存在，则进入enq方法，double check一下，确定队列仍然没有创建，则通过cas的原子方法创建队列。
+
+我还是觉得非常有必要再看一眼shouldParkAfterFailedAcquire方法，这个方法也是我最疑惑的一点。
+
+	private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
+        int ws = pred.waitStatus;
+        if (ws == Node.SIGNAL)
+            /*
+             * This node has already set status asking a release
+             * to signal it, so it can safely park.
+             */
+            return true;
+        if (ws > 0) {
+            /*
+             * Predecessor was cancelled. Skip over predecessors and
+             * indicate retry.
+             */
+            do {
+                node.prev = pred = pred.prev;
+            } while (pred.waitStatus > 0);
+            pred.next = node;
+        } else {
+            /*
+             * waitStatus must be 0 or PROPAGATE.  Indicate that we
+             * need a signal, but don't park yet.  Caller will need to
+             * retry to make sure it cannot acquire before parking.
+             */
+            compareAndSetWaitStatus(pred, ws, Node.SIGNAL);
+        }
+        return false;
+    }
+
+因为我很疑惑，所以在这里写下的东西只是我的理解。这个方法总共有几个判断条件。
+
+ 1. 如果前驱节点的状态是SIGNAL，则返回true，也就是让当前节点立刻休眠。
+ 2. 如果前驱结点被取消，则尝试在队列中向前查找，找到一个没有被取消的节点，与当前节点关联上。这意味着在这里也会从队列中删除掉所有的CANCEL状态的节点。这个动作实际上发生在很多地方，因为设置节点的CANCEL状态和删除CANCEL并不是串行的。
+ 3. 如果前驱结点状态为SYNC或PROPAGATE，则设置它的状态为SIGNAL，并返回false，即当前节点先不休眠，尝试自旋一次后再次进行获取锁的操作。
+
+从这里可以看到最后一个节点总是
+
+到此为止CountDownLatch.await方法就都解析完了。
+
+
+
+
+
+
+
 
 
 Hey! I'm your first Markdown document in **StackEdit**[^stackedit]. Don't delete me, I'm very helpful! I can be recovered anyway in the **Utils** tab of the <i class="icon-cog"></i> **Settings** dialog.
