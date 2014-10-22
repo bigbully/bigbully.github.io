@@ -318,3 +318,63 @@ acquireSharedInterruptibly方法是在AbstractQueuedSynchronizer已经实现好�
 经过countDown，也就是调用releaseShared方法后。检查当前head node，发现是空节点，状态为SIGNAL，把空节点的状态还原为SYNC，唤醒自己的后继node T1。node T1被唤醒后，进入自旋，尝试获得锁，因为count=0，则成功获得锁，继而调用setHeadAndPropagate方法，把自己设置为head node，并尝试向后传播。因为后集结点的类型也是共享类型，会再次触发doReleaseShared方法。这回因为T1已经是head node，发现T1状态为SIGNAL，便把自己的状态还原为SYNC，并唤醒自己的后继node T2。T2被唤醒后自旋……
 
 所以在等待中的各个node会依次被唤醒。在执行unparkSuccessor方法唤醒后继节点的时候还会把队列中状态为CANCELLED的node移除队列。
+
+java.util.concurrent中的并发工具类最显著的特点就是提供了在一定时间内尝试获取锁超时返回的特性。CountDownLatch也不例外。
+
+	public boolean await(long timeout, TimeUnit unit)
+        throws InterruptedException {
+        return sync.tryAcquireSharedNanos(1, unit.toNanos(timeout));
+    }
+
+	public final boolean tryAcquireSharedNanos(int arg, long nanosTimeout)
+            throws InterruptedException {
+        if (Thread.interrupted())
+            throw new InterruptedException();
+        return tryAcquireShared(arg) >= 0 ||
+            doAcquireSharedNanos(arg, nanosTimeout);
+    }
+
+await方法提供加入超时时间的重载，用途是等待一段时间，如果count没有减为0则返回。这个方法调用的是AbstractQueuedSynchronizer中的tryAcquireSharedNanos方法，第二个参数为超时时间。外部的所有逻辑与不带超时时间的方法几乎一致。重点在于doAcquireSharedNanos中加入了第二个维度，时间维度。
+
+	private boolean doAcquireSharedNanos(int arg, long nanosTimeout)
+        throws InterruptedException {
+
+        long lastTime = System.nanoTime();
+        final Node node = addWaiter(Node.SHARED);
+        boolean failed = true;
+        try {
+            for (;;) {
+                final Node p = node.predecessor();
+                if (p == head) {
+                    int r = tryAcquireShared(arg);
+                    if (r >= 0) {
+                        setHeadAndPropagate(node, r);
+                        p.next = null; // help GC
+                        failed = false;
+                        return true;
+                    }
+                }
+                if (nanosTimeout <= 0)
+                    return false;
+                if (shouldParkAfterFailedAcquire(p, node) &&
+                    nanosTimeout > spinForTimeoutThreshold)
+                    LockSupport.parkNanos(this, nanosTimeout);
+                long now = System.nanoTime();
+                nanosTimeout -= now - lastTime;
+                lastTime = now;
+                if (Thread.interrupted())
+                    throw new InterruptedException();
+            }
+        } finally {
+            if (failed)
+                cancelAcquire(node);
+        }
+    }
+
+
+这个方法不同之处用两点。首先引入了自旋锁的概念，如果超时时间很短，则不让线程挂起，而是通过自旋代替，这样线程获得锁很快就释放的情况下能消耗少量的cpu资源节省线程挂起和恢复的性能损耗。
+
+当然如果超时时间大于一个阈值（spinForTimeoutThreshold），会使用LockSupport.parkNanos(this, nanosTimeout)把线程在一定时间内阻塞。
+
+其他所有逻辑和不带超时时间的方法一致。
+
