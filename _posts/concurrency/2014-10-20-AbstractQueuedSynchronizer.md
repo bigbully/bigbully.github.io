@@ -215,12 +215,6 @@ acquireSharedInterruptibly方法是在AbstractQueuedSynchronizer已经实现好�
  1. addWaiter时首先迅速判断一下队列是不是已经建立好了，即tail节点是不是已经存在了，如果存在，则把当前节点加到队列末尾。
  2. 如果不存在，则进入enq方法，double check一下，确定队列仍然没有创建，则通过cas的原子方法创建队列。
 
-当有两个线程都先后尝试获取锁的时候，FIFO队列的快照和node状态如图所示：
-
-![image](http://bigbully.github.io/images/aqs-acquireShare.png)
-
-可以看到第一个线程T1尝试获取锁没成功的时候，会初始化这个队列，创建特殊节点，head node。并把head node的状态从SYNC切换到SIGNAL，自身维持SYNC的状态。当第二个线程T2，尝试获取锁失败时，会把他的前驱节点T1的状态从SYNC切换到SIGNAL，自身维持SYNC的状态。
-
 我还是觉得非常有必要再看一眼shouldParkAfterFailedAcquire方法，这个方法也是我最疑惑的一点。
 
 	private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
@@ -307,3 +301,20 @@ acquireSharedInterruptibly方法是在AbstractQueuedSynchronizer已经实现好�
         }
     }
 
+这个方法有以下几个步骤：
+
+ 1. 首先获得head node，检查head node不为空且不是最后一个节点时，会检查head node的状态，如果是SIGNAL，则用cas设为SYNC，成功后唤醒后继节点。
+ 2. 如果碰巧其他线程已经提前吧head node设置为SYNC状态，则再次把其状态设为PROPAGATE，用来能够继续向后传播。
+ 3. 当head node没有被改变时，方法执行完毕。
+
+这个方法因为唤醒了其他线程，所以会造成连锁反应。这里用张图来表示或许会更清晰一下。
+
+当有两个线程都先后尝试获取锁，之后countDown方法被执行，count归零后，两个线程依次被唤醒的FIFO队列的快照和node状态如图所示：
+
+![image](http://bigbully.github.io/images/aqs-acquireShare.png)
+
+可以看到第一个线程T1尝试获取锁失败时，会初始化这个队列，创建一个空node， 这个node不包含任何线程，纯粹为了占位用，作为head node。并把head node的状态从SYNC切换到SIGNAL，自身维持SYNC的状态，并阻塞。当第二个线程T2，尝试获取锁失败时，会把他的前驱node T1的状态从SYNC切换到SIGNAL，自身维持SYNC的状态，并阻塞。
+
+经过countDown，也就是调用releaseShared方法后。检查当前head node，发现是空节点，状态为SIGNAL，把空节点的状态还原为SYNC，唤醒自己的后继node T1。node T1被唤醒后，进入自旋，尝试获得锁，因为count=0，则成功获得锁，继而调用setHeadAndPropagate方法，把自己设置为head node，并尝试向后传播。因为后集结点的类型也是共享类型，会再次触发doReleaseShared方法。这回因为T1已经是head node，发现T1状态为SIGNAL，便把自己的状态还原为SYNC，并唤醒自己的后继node T2。T2被唤醒后自旋……
+
+所以在等待中的各个node会依次被唤醒。在执行unparkSuccessor方法唤醒后继节点的时候还会把队列中状态为CANCELLED的node移除队列。
