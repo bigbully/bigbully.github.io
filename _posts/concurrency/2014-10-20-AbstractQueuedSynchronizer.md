@@ -5,6 +5,8 @@ description: 并发的灵魂
 category: concurrency
 ---
 
+AbstractQueuedSynchronizer
+----------------------------------
 
 如果不读源码，我不会知道AbstractQueuedSynchronizer，更不会认识到它使整个java.util.concurrent包中众多并发工具类的灵魂。AbstractQueuedSynchronizer官方的推荐用法是，在并发工具类内部使用一个同步器sync实现来继承AbstractQueuedSynchronizer，并把预留的抽象方法(例如acquire和release)赋予业务含义后，同步相关的操作就交由sync来执行了。
 
@@ -378,3 +380,153 @@ await方法提供加入超时时间的重载，用途是等待一段时间，如
 
 其他所有逻辑和不带超时时间的方法一致。
 
+
+
+ReentrantLock
+------------------
+
+可重入锁ReentrantLock是典型的独占式的同步器，可以用来代替synchronized关键字，而且还提供更加丰富的功能。
+
+首先从构造函数入手：
+
+	public ReentrantLock() {
+        sync = new NonfairSync();
+    }
+    
+	public ReentrantLock(boolean fair) {
+        sync = fair ? new FairSync() : new NonfairSync();
+    }
+
+默认的构造函数创建的是非公平锁，对于想要获取锁并处于阻塞状态的线程们来说，并不是等待时间最长的线程，即排在队列前面的线程先获得锁。而公平锁相反，能保证等待时间最长的线程，即排在队列前面的线程先获得锁。
+
+不如同时分析非公平锁NonfairSync和公平锁FairSync的实现原理吧，这样可以有个对比，能看的出差别到底在哪。
+
+首先来看获取锁的操作：
+
+	public void lock() {
+        sync.lock();
+    }
+
+	非公平锁：
+	final void lock() {
+        if (compareAndSetState(0, 1))
+			   setExclusiveOwnerThread(Thread.currentThread());
+        else
+            acquire(1);
+    }
+
+	公平锁：
+	final void lock() {
+        acquire(1);
+    }
+
+NonfairSync，第一时间尝试用cas设置state状态，如果成功，会设置当前线程为占有锁的线程。如果不成功，会常规的调用acquire方法。
+
+FairSync，直接调用acquire方法。
+
+再详细看看acquire方法，这个方法是在AbstractQueuedSynchronizer中已经实现好的
+
+	public final void acquire(int arg) {
+        if (!tryAcquire(arg) &&
+            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+            selfInterrupt();
+    }
+
+这里会首先通过tryAcquire方法尝试获取锁，接下来看tryAcquire在NonfairSync和FairSync中的具体实现：
+
+	非公平锁：
+	protected final boolean tryAcquire(int acquires) {
+        return nonfairTryAcquire(acquires);
+    }
+	
+	final boolean nonfairTryAcquire(int acquires) {
+            final Thread current = Thread.currentThread();
+            int c = getState();
+            if (c == 0) {
+                if (compareAndSetState(0, acquires)) {
+                    setExclusiveOwnerThread(current);
+                    return true;
+                }
+            }
+            else if (current == getExclusiveOwnerThread()) {
+                int nextc = c + acquires;
+                if (nextc < 0) // overflow
+                    throw new Error("Maximum lock count exceeded");
+                setState(nextc);
+                return true;
+            }
+            return false;
+        }	
+
+	公平锁：
+	protected final boolean tryAcquire(int acquires) {
+            final Thread current = Thread.currentThread();
+            int c = getState();
+            if (c == 0) {
+                if (!hasQueuedPredecessors() &&
+                    compareAndSetState(0, acquires)) {
+                    setExclusiveOwnerThread(current);
+                    return true;
+                }
+            }
+            else if (current == getExclusiveOwnerThread()) {
+                int nextc = c + acquires;
+                if (nextc < 0)
+                    throw new Error("Maximum lock count exceeded");
+                setState(nextc);
+                return true;
+            }
+            return false;
+        }
+
+这两个方法几乎不用多说，逻辑清晰，区别就在于公平锁在获取锁之前要判断一下，当前线程是不是排在队列最前面，即等待时间最长的线程，如果是，才能获得锁。
+
+再仔细看一下如何判断自己是不是队列中最前面的线程：
+
+	public final boolean hasQueuedPredecessors() {
+        // The correctness of this depends on head being initialized
+        // before tail and on head.next being accurate if the current
+        // thread is first in queue.
+        Node t = tail; // Read fields in reverse initialization order
+        Node h = head;
+        Node s;
+        return h != t &&
+            ((s = h.next) == null || s.thread != Thread.currentThread());
+    }
+
+我们知道AbstractQueuedSynchronizer的队列在排队时默认的head节点是空节点，而已经获得锁的节点会被设为head节点，所以想要获得锁的节点永远只会从head节点的后继节点开始排起。所以判断条件就是，如果队列中有节点（h != t），并且head节点的后继节点是空或后继节点不是当前线程的所在节点（(s = h.next) == null || s.thread != Thread.currentThread()），则当前线程之前仍然有前驱节点，所以无法获得锁。
+
+如果没能获得锁则需要创建node，并排入队列中。
+
+	acquireQueued(addWaiter(Node.EXCLUSIVE), arg)
+
+addWaiter方法就不多说了，上文详细分析过。这里主要看看acquireQueued方法。
+
+	final boolean acquireQueued(final Node node, int arg) {
+        boolean failed = true;
+        try {
+            boolean interrupted = false;
+            for (;;) {
+                final Node p = node.predecessor();
+                if (p == head && tryAcquire(arg)) {
+                    setHead(node);
+                    p.next = null; // help GC
+                    failed = false;
+                    return interrupted;
+                }
+                if (shouldParkAfterFailedAcquire(p, node) &&
+                    parkAndCheckInterrupt())
+                    interrupted = true;
+            }
+        } finally {
+            if (failed)
+                cancelAcquire(node);
+        }
+    }
+
+是不是很熟悉？这个方法与获取共享锁唯一的区别就是，当获取锁成功之后把当前节点设置为head节点，但不会向后传播，毕竟只有共享锁才会被多个线程同时获得锁，独占锁顾名思义，是某一个线程专属的。
+
+到此为止，ReentrantLock的lock方法，就分析完了。
+
+
+	
