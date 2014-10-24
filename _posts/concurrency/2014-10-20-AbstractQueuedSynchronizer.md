@@ -526,7 +526,136 @@ addWaiter方法就不多说了，上文详细分析过。这里主要看看acqui
 
 是不是很熟悉？这个方法与获取共享锁唯一的区别就是，当获取锁成功之后把当前节点设置为head节点，但不会向后传播，毕竟只有共享锁才会被多个线程同时获得锁，独占锁顾名思义，是某一个线程专属的。
 
-到此为止，ReentrantLock的lock方法，就分析完了。
+这之后，我们都知道synchronized的锁无法被中断，自然而然ReentrantLock也就提供了可中断的锁的实现。
 
+	ReentrantLock中：
+	public void lockInterruptibly() throws InterruptedException {
+        sync.acquireInterruptibly(1);
+    }
+
+	AbstractQueuedSynchronizer中：
+	public final void acquireInterruptibly(int arg)
+            throws InterruptedException {
+        if (Thread.interrupted())
+            throw new InterruptedException();
+        if (!tryAcquire(arg))
+            doAcquireInterruptibly(arg);
+    }
+	
+	private void doAcquireInterruptibly(int arg)
+        throws InterruptedException {
+        final Node node = addWaiter(Node.EXCLUSIVE);
+        boolean failed = true;
+        try {
+            for (;;) {
+                final Node p = node.predecessor();
+                if (p == head && tryAcquire(arg)) {
+                    setHead(node);
+                    p.next = null; // help GC
+                    failed = false;
+                    return;
+                }
+                if (shouldParkAfterFailedAcquire(p, node) &&
+                    parkAndCheckInterrupt())
+                    throw new InterruptedException();
+            }
+        } finally {
+            if (failed)
+                cancelAcquire(node);
+        }
+    }
+
+带中断的lock方法归根结底就是在parkAndCheckInterrupt方法中如果检查到当前线程已经被中断，会再次抛出InterruptedException异常而已。
+
+ReentrantLock还提供了tryLock方法，用于尝试获得锁。不过注意！！！这个方法调用的是sync.nonfairTryAcquire方法，回忆一下之前的源代码，就会发现调用这个方法会造成，如果可以获得锁，就会立即获得，即便初始化的是公平锁！这个方法会打破公平性，另外需要注意的是，tryLock之后也需要在finally中调用unlock方法。
+
+	public boolean tryLock() {
+        return sync.nonfairTryAcquire(1);
+    }
+
+最后，来看一下带超时时间的锁获取方法：
+
+	ReentrantLock中：
+	public boolean tryLock(long timeout, TimeUnit unit)
+            throws InterruptedException {
+        return sync.tryAcquireNanos(1, unit.toNanos(timeout));
+    }
+
+	AbstractQueuedSynchronizer中：
+	public final boolean tryAcquireNanos(int arg, long nanosTimeout)
+            throws InterruptedException {
+        if (Thread.interrupted())
+            throw new InterruptedException();
+        return tryAcquire(arg) ||
+            doAcquireNanos(arg, nanosTimeout);
+    }
+
+	private boolean doAcquireNanos(int arg, long nanosTimeout)
+        throws InterruptedException {
+        long lastTime = System.nanoTime();
+        final Node node = addWaiter(Node.EXCLUSIVE);
+        boolean failed = true;
+        try {
+            for (;;) {
+                final Node p = node.predecessor();
+                if (p == head && tryAcquire(arg)) {
+                    setHead(node);
+                    p.next = null; // help GC
+                    failed = false;
+                    return true;
+                }
+                if (nanosTimeout <= 0)
+                    return false;
+                if (shouldParkAfterFailedAcquire(p, node) &&
+                    nanosTimeout > spinForTimeoutThreshold)
+                    LockSupport.parkNanos(this, nanosTimeout);
+                long now = System.nanoTime();
+                nanosTimeout -= now - lastTime;
+                lastTime = now;
+                if (Thread.interrupted())
+                    throw new InterruptedException();
+            }
+        } finally {
+            if (failed)
+                cancelAcquire(node);
+        }
+    }
+
+写到这里，我觉得也有必要提一下为什么要把AbstractQueuedSynchronizer的实现类都写在一篇笔记里的原因了。共享模式和独占模式代码上的区别简直太小了，但是可重用度并不高，毕竟性能至上。
+
+加锁的所有方法，也就这些了。下面来看看如何解锁：
+
+	ReentrantLock中：
+	public void unlock() {
+        sync.release(1);
+    }
+
+	ReentrantLock-sync中：
+	protected final boolean tryRelease(int releases) {
+            int c = getState() - releases;
+            if (Thread.currentThread() != getExclusiveOwnerThread())
+                throw new IllegalMonitorStateException();
+            boolean free = false;
+            if (c == 0) {
+                free = true;
+                setExclusiveOwnerThread(null);
+            }
+            setState(c);
+            return free;
+        }
+
+
+	AbstractQueuedSynchronizer中：
+	public final boolean release(int arg) {
+        if (tryRelease(arg)) {
+            Node h = head;
+            if (h != null && h.waitStatus != 0)
+                unparkSuccessor(h);
+            return true;
+        }
+        return false;
+    }
 
 	
+独占模式的unlock方法比共享模式简单许多，tryRelease判断条件就是如果自己没加锁缺想解锁，这不搞笑吗？直接异常抛出。接下来判断自己占用了几层锁，如果解到最后一层后才宣布锁被我释放了。之后会通知后继节点。对比共享模式的通知所有等待的节点，独占模式只对当前节点的后继节点有通知的义务。
+
