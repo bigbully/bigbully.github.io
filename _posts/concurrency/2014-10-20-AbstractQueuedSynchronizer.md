@@ -659,3 +659,19 @@ ReentrantLock还提供了tryLock方法，用于尝试获得锁。不过注意！
 	
 独占模式的unlock方法比共享模式简单许多，tryRelease判断条件就是如果自己没加锁缺想解锁，这不搞笑吗？直接异常抛出。接下来判断自己占用了几层锁，如果解到最后一层后才宣布锁被我释放了。之后会通知后继节点。对比共享模式的通知所有等待的节点，独占模式只对当前节点的后继节点有通知的义务。
 
+接下来是一些简单的工具方法的介绍：
+
+ - getHoldCount.用来返回锁被获取了多少层，当然只有自己是获取锁的线程时才能知道，否则对其他线程来说都是0层。
+ - isHeldByCurrentThread.询问是不是当前线程获得的锁
+ - isLocked.锁是不是已经被获取了
+ - isFair.是不是公平锁
+ - getOwner.哪个线程获得了锁，返回的是线程对象
+ - hasQueuedThreads.有没有线程在排队，判断条件是head == tail
+ - hasQueuedThread(Thread thread).这个线程是不是在排队
+ - getQueueLength.队列的长度
+ - getQueuedThreads.返回所有排队线程的集合
+ 
+就这些！
+
+与Condition有关的方法，会在学习Condition的时候详细分析。
+
