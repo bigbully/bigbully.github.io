@@ -673,5 +673,65 @@ ReentrantLock还提供了tryLock方法，用于尝试获得锁。不过注意！
  
 就这些！
 
-与Condition有关的方法，会在学习Condition的时候详细分析。
+Condition
+------------
+
+Condition在我眼中一直是很神秘的，这源于Object.wait方法，大家都知道Condition.await方法可以取代它，其实早在使用Object.wait和notify的时候我就不太明白，为什么这个看上去和synchronized无任何关系的方法必须要写在同步代码块里，否则就会抛异常。
+
+仔细查看了Condition源码之后，我彻底明白了其中的原理。
+
+先举一个jdk在注释中给出的例子：
+
+	class BoundedBuffer {
+        final Lock lock = new ReentrantLock();
+        final Condition notFull = lock.newCondition();
+
+        final Condition notEmpty = lock.newCondition();
+
+        final Object[] items = new Object[100];
+        int putptr, takeptr, count;
+
+        public void put(Object x) throws InterruptedException {
+            lock.lock();
+            try {
+                while (count == items.length)
+                    notFull.await();
+                items[putptr] = x;
+                if (++putptr == items.length) putptr = 0;
+                ++count;
+                notEmpty.signal();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        public Object take() throws InterruptedException {
+            lock.lock();
+            try {
+                while (count == 0)
+                    notEmpty.await();
+                Object x = items[takeptr];
+                if (++takeptr == items.length) takeptr = 0;
+                --count;
+                notFull.signal();
+                return x;
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
+上面的代码中初始化了一个ReentrantLock lock，和两个Condition notFull和notEmpty，模拟了一个BlockArrayQueue的容器，put和take在容器满和容器空得情况下分别阻塞。Condition需要配合lock使用，在锁内，可以让某个Condition await， 也可以让某个Condition signal。这相当于Object的wait和notify，与wait和notify相仿，当Condition在锁内await的时候会释放当前持有的锁，知道被中断或其他线程调用同一个Condition的signal方法。
+
+Condition实际上是一个接口，他描述了Condition的实现类的所有行为，而实现类ConditionObject是AbstractQueuedSynchronizer的一个内部类，这很重要，因为ConditionObject需要调用AbstractQueuedSynchronizer定义的方法。
+因为Lock接口本身需要实现newCondition方法，不同的Lock的实现类（比如jdk本身提供的ReentrantLock，WriteLock）虽然都会实现这个方法，而且实质都是new ConditionObject()，但Condition的行为会随着Lock的实现类有所不同。
+
+下面会拿ReentrantLock举例。
+
+	public class ConditionObject implements Condition, java.io.Serializable {
+		private transient Node firstWaiter;
+        private transient Node lastWaiter;
+	}
+
+
 
