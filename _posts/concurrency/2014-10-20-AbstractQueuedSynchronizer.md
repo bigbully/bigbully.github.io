@@ -724,14 +724,96 @@ Condition在我眼中一直是很神秘的，这源于Object.wait方法，大家
 上面的代码中初始化了一个ReentrantLock lock，和两个Condition notFull和notEmpty，模拟了一个BlockArrayQueue的容器，put和take在容器满和容器空得情况下分别阻塞。Condition需要配合lock使用，在锁内，可以让某个Condition await， 也可以让某个Condition signal。这相当于Object的wait和notify，与wait和notify相仿，当Condition在锁内await的时候会释放当前持有的锁，知道被中断或其他线程调用同一个Condition的signal方法。
 
 Condition实际上是一个接口，他描述了Condition的实现类的所有行为，而实现类ConditionObject是AbstractQueuedSynchronizer的一个内部类，这很重要，因为ConditionObject需要调用AbstractQueuedSynchronizer定义的方法。
-因为Lock接口本身需要实现newCondition方法，不同的Lock的实现类（比如jdk本身提供的ReentrantLock，WriteLock）虽然都会实现这个方法，而且实质都是new ConditionObject()，但Condition的行为会随着Lock的实现类有所不同。
-
-下面会拿ReentrantLock举例。
+因为Lock接口本身需要实现newCondition方法，不同的Lock的实现类（比如jdk本身提供的ReentrantLock，WriteLock）虽然都会实现这个方法，而且实质都是new ConditionObject()，但Condition的行为会随着Lock的实现类有所不同。下面会拿ReentrantLock举例。
 
 	public class ConditionObject implements Condition, java.io.Serializable {
 		private transient Node firstWaiter;
         private transient Node lastWaiter;
 	}
 
+ConditionObject自带两个属性firstWaiter，lastWaiter用来表示Condition队列的头尾元素。当有多个线程都在await中，等待signal时，必须有FIFO队列才能保证先await的线程可以被最先signal。
 
+先来看await方法：
+	
+        public final void await() throws InterruptedException {
+            if (Thread.interrupted())
+                throw new InterruptedException();
+            Node node = addConditionWaiter();
+            int savedState = fullyRelease(node);
+            int interruptMode = 0;
+            while (!isOnSyncQueue(node)) {
+                LockSupport.park(this);
+                if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+                    break;
+            }
+            if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
+                interruptMode = REINTERRUPT;
+            if (node.nextWaiter != null) // clean up if cancelled
+                unlinkCancelledWaiters();
+            if (interruptMode != 0)
+                reportInterruptAfterWait(interruptMode);
+        }		
+
+代码没几行，不过对我来说理解起来还是花了些时间的。
+
+首先这个方法可以响应中断，这与Object.wait方法一样。所以方法调用之初会判断当前线程的中断状态，如果已经中断，则直接抛出InterruptedException。
+
+接下来addConditionWaiter方法会把当前线程放入Condition队列中。
+
+        private Node addConditionWaiter() {
+            Node t = lastWaiter;
+            // If lastWaiter is cancelled, clean out.
+            if (t != null && t.waitStatus != Node.CONDITION) {
+                unlinkCancelledWaiters();
+                t = lastWaiter;
+            }
+            Node node = new Node(Thread.currentThread(), Node.CONDITION);
+            if (t == null)
+                firstWaiter = node;
+            else
+                t.nextWaiter = node;
+            lastWaiter = node;
+            return node;
+        }
+
+当Condition队列的队尾节点lastWaiter已经被取消的话，会调用unlinkCancelledWaiters方法，这个方法会从队列头开始检查，去除掉队列中的所有已取消的节点。之后把包含当前线程的节点放入队列中。
+
+再回头看看await方法，当前节点放入Condition队列后，会执行fullyRelease(node)方法，并返回当前保存的state值。为什么要在这里执行fullyRelease，其实是以为如果当前线程在锁内想要await，必须释放锁的缘故。而且他必须能够释放锁，否则会抛出IllegalMonitorStateException异常。这就是在锁外执行await的结果。
+
+	final int fullyRelease(Node node) {
+        boolean failed = true;
+        try {
+            int savedState = getState();
+            if (release(savedState)) {
+                failed = false;
+                return savedState;
+            } else {
+                throw new IllegalMonitorStateException();
+            }
+        } finally {
+            if (failed)
+                node.waitStatus = Node.CANCELLED;
+        }
+    }
+
+值得注意的是，如果释放锁失败了，会主动把当前节点的状态置为Node.CANCELLED，便于其他线程触发unlinkCancelledWaiters逻辑把已取消的节点移除Condition队列。
+
+接下来要进行一个isOnSyncQueue的判断。顺便一提的是Condition本身涉及到两个队列，一个是Condition队列，用来等待被signal，另一个是Sync队列，用来等待获得锁。
+
+	final boolean isOnSyncQueue(Node node) {
+        if (node.waitStatus == Node.CONDITION || node.prev == null)
+            return false;
+        if (node.next != null) // If has successor, it must be on queue
+            return true;
+        return findNodeFromTail(node);
+    }
+
+判断是否在Sync队列中的条件是
+
+ 1. 如果状态为Node.CONDITION，则肯定不在Sync队列中
+ 2. 如果node.prev未被使用（因为Sync队列是使用prev和next来保存队列节点的引用的），则肯定不在Sync队列中
+ 3. 如果node.next被使用，说明肯定在Sync队列中
+ 4. 以上几种情况是典型的能明确判断是否在Sync队列的标识。由于节点有可能处于Node.CANCELLED，或者node.next为空，即处于Sync队列的队尾，则没有办法，只好冲Sync队列队尾开始遍历，知道找到节点为止。
+
+由于当前节点在Condition队列中，所以必然不在Sync队列中，从状态上可以分辨出来。因此使用LockSupport.park(this)阻塞当前线程。
 
