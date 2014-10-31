@@ -817,3 +817,72 @@ ConditionObject自带两个属性firstWaiter，lastWaiter用来表示Condition�
 
 由于当前节点在Condition队列中，所以必然不在Sync队列中，从状态上可以分辨出来。因此使用LockSupport.park(this)阻塞当前线程。
 
+    private int checkInterruptWhileWaiting(Node node) {
+        return Thread.interrupted() ?
+                (transferAfterCancelledWait(node) ? THROW_IE : REINTERRUPT) :
+                0;
+    }
+
+
+	final boolean transferAfterCancelledWait(Node node) {
+        if (compareAndSetWaitStatus(node, Node.CONDITION, 0)) {
+            enq(node);
+            return true;
+        }
+    
+        while (!isOnSyncQueue(node))
+            Thread.yield();
+        return false;
+    }
+
+当前线程被唤醒分为三种情况：0.正常被唤醒，-1唤醒之前被中断。1.唤醒之后被中断。如果是被中断的话会继续进行transferAfterCancelledWait，这个方法首先会查看当前节点是否还是Node.CONDITION状态，如果被中断就还是这个状态，如果被其他线程signal的话，状态就已经被置为0了，并放入Sync队列中了，下面介绍signal方法的时候可以看到。如果是被中断，则在这里会尝试把状态置为0并放入Sync队列中等待获得锁。如果是被signal，当前线程会检查是不是已经放入Sync队列了，如果不是就自旋，知道确认为止。由于线程被中断的触发发生在被唤醒前后导致后续的处理是继续把中断异常上抛，还是再次恢复中断。
+
+接下来带着之前保存的saveState调用acquireQueued方法，之前介绍过这个方法，独占模式下尝试获取获取sync锁。获取锁失败则阻塞，成功之后继续往下执行。判断作为当前节点有没有后继的Condition节点，再做一次把已取消的节点剔除出Condition队列的操作。最后一步是根据是否中断和中断发生在唤醒前后来执行后续操作。
+
+condition还提供了其他await方法：
+
+ - awaitUninterruptibly().不响应中断的await
+ - awaitNanos(long nanosTimeout) throws InterruptedException.最多await一段时间，单位是纳秒
+ - awaitUntil(Date deadline) throws InterruptedException.根据给定的时间作为await的最后期限。
+ - await(long time, TimeUnit unit)  throws InterruptedException.有超时时间的await.
+
+所有这些方法都大同小异，只不过在await()方法的基础上做了一些增减，或是去掉了对中断的响应，或是加入了对时间维度的支持。
+
+再来看看如何signal的
+
+	    private void doSignal(Node first) {
+            do {
+                if ( (firstWaiter = first.nextWaiter) == null)
+                    lastWaiter = null;
+                first.nextWaiter = null;
+            } while (!transferForSignal(first) &&
+                     (first = firstWaiter) != null);
+        }
+
+  
+        private void doSignalAll(Node first) {
+            lastWaiter = firstWaiter = null;
+            do {
+                Node next = first.nextWaiter;
+                first.nextWaiter = null;
+                transferForSignal(first);
+                first = next;
+            } while (first != null);
+        }
+
+		final boolean transferForSignal(Node node) {
+        
+	        if (!compareAndSetWaitStatus(node, Node.CONDITION, 0))
+	            return false;
+
+        
+	        Node p = enq(node);
+	        int ws = p.waitStatus;
+	        if (ws > 0 || !compareAndSetWaitStatus(p, ws, Node.SIGNAL))
+	            LockSupport.unpark(node.thread);
+	        return true;
+	    }
+
+仔细观察会发现，signal方法并没有直接unpark await的线程，而是把处于Condition队列中的线程移到Sync队列中，当signal方法执行完之后，lock.unlock()的时候才会由释放独占锁的方式唤醒处于Sync队列中的线程。
+
+signal和signalAll方法的区别在于：signal方法会找到第一个遇到的没有被取消的节点，把他移到Sync队列中。而signalAll方法则会移动所有的Condition队列中的节点。
