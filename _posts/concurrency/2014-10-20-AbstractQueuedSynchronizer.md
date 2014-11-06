@@ -888,10 +888,10 @@ condition还提供了其他await方法：
 signal和signalAll方法的区别在于：signal方法会找到第一个遇到的没有被取消的节点，把他移到Sync队列中。而signalAll方法则会移动所有的Condition队列中的节点。
 
 
-FutureTask
+FutureTask(1.6)
 -------------
 
-接下来不说锁了，换个其他用途的同步器：FutureTask。作为异步转同步的利器自然离不开并发，离不开AbstractQueuedSynchronizer，接下来看看它是如何实现的。
+接下来不说锁了，换个其他用途的同步器：FutureTask。要知道只有1.6版本的FutureTask是由AbstractQueuedSynchronizer实现的。1.7版本被重写，摈弃了AbstractQueuedSynchronizer，是因为为了避免FutureTask在被取消发生的竞争时保留中断状态。1.7版本会有单独的笔记进行介绍。
 
 	public FutureTask(Callable<V> callable) {
         if (callable == null)
@@ -905,3 +905,4 @@ FutureTask
     }
 
 先从构造函数看起，无论是Callable还是Runnable+result，只要有返回值，就ok。
+
