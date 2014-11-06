@@ -886,3 +886,22 @@ condition还提供了其他await方法：
 仔细观察会发现，signal方法并没有直接unpark await的线程，而是把处于Condition队列中的线程移到Sync队列中，当signal方法执行完之后，lock.unlock()的时候才会由释放独占锁的方式唤醒处于Sync队列中的线程。
 
 signal和signalAll方法的区别在于：signal方法会找到第一个遇到的没有被取消的节点，把他移到Sync队列中。而signalAll方法则会移动所有的Condition队列中的节点。
+
+
+FutureTask
+-------------
+
+接下来不说锁了，换个其他用途的同步器：FutureTask。作为异步转同步的利器自然离不开并发，离不开AbstractQueuedSynchronizer，接下来看看它是如何实现的。
+
+	public FutureTask(Callable<V> callable) {
+        if (callable == null)
+            throw new NullPointerException();
+        sync = new Sync(callable);
+    }
+
+    
+    public FutureTask(Runnable runnable, V result) {
+        sync = new Sync(Executors.callable(runnable, result));
+    }
+
+先从构造函数看起，无论是Callable还是Runnable+result，只要有返回值，就ok。
