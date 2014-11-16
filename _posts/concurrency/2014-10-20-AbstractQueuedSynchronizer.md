@@ -888,10 +888,14 @@ condition还提供了其他await方法：
 signal和signalAll方法的区别在于：signal方法会找到第一个遇到的没有被取消的节点，把他移到Sync队列中。而signalAll方法则会移动所有的Condition队列中的节点。
 
 
-FutureTask(1.6)
+FutureTask(基于AbstractQueuedSynchronizer)
 -------------
 
-接下来不说锁了，换个其他用途的同步器：FutureTask。要知道只有1.6版本的FutureTask是由AbstractQueuedSynchronizer实现的。1.7版本被重写，摈弃了AbstractQueuedSynchronizer，是因为为了避免FutureTask在被取消发生的竞争时保留中断状态。1.7版本会有单独的笔记进行介绍。
+FutureTask在jdk1.7时进行过一次重写，重写之前的FutureTask是基于AbstractQueuedSynchronizer实现的。重写后摈弃了AbstractQueuedSynchronizer，是为了避免FutureTask在被取消发生的竞争时保留中断状态。重写后的版本会有单独的笔记进行介绍。
+
+FutureTask通常的使用方式是使用线程或线程池来提交一个FutureTask，之后使用Get来阻塞的获得结果。提交任务和获取结果之间是异步的。
+
+现在来看看基于AbstractQueuedSynchronizer的FutureTask是如何实现的。
 
 	public FutureTask(Callable<V> callable) {
         if (callable == null)
@@ -904,5 +908,114 @@ FutureTask(1.6)
         sync = new Sync(Executors.callable(runnable, result));
     }
 
-先从构造函数看起，无论是Callable还是Runnable+result，只要有返回值，就ok。
+先从构造函数看起，无论是Callable还是Runnable+Result，共同之处在于，要有返回值。Executors.callable(runnable, result)方法会把Runnable+Result转化成Callable，传给Sync的构造函数。
+
+因为FutureTask实现了RunnableFuture， RunnableFuture继承了Runnable，所以FutureTask实现了run方法会被线程或线程池调用，下面来看一下run方法：
+
+	public void run() {
+        sync.innerRun();
+    }
+
+FutureTask的run方法实际执行的是sync的innerRun方法。
+
+		void innerRun() {
+            if (!compareAndSetState(READY, RUNNING))//state初始化为READY，这里通过CAS设置为RUNNING，如果失败的话证明futureTask已经被取消，则直接返回
+                return;
+
+            runner = Thread.currentThread();
+            if (getState() == RUNNING) { //再获取当前线程后再次确认state为RUNNING
+	            //执行callable.call()获得返回值
+                V result;
+                try {
+                    result = callable.call();
+                } catch (Throwable ex) {
+                    setException(ex);//记录异常
+                    return;
+                }
+                set(result);//保存返回值
+            } else {//如果发现state已经改变则释放共享锁
+                releaseShared(0); // cancel
+            }
+        }
+
+当出现任何异常时会通过setException(ex)记录下异常，当得到返回值时会通过set(result)记录下返回值，两个方法实现上是大致相同的，这里只分析一下set(result)方法：
+
+	protected void set(V v) {
+        sync.innerSet(v);
+    }
+
+	void innerSet(V v) {
+            for (;;) {
+                int s = getState();//获取状态
+                if (s == RAN)//如果状态是已完成，则直接返回
+                    return;
+                if (s == CANCELLED) {//状态是取消，如注释所示，有可能是和取消的线程同时执行了，次时强行释放共享锁，并设置runner为null
+                    // aggressively release to set runner to null,
+                    // in case we are racing with a cancel request
+                    // that will try to interrupt runner
+                    releaseShared(0);
+                    return;
+                }
+                if (compareAndSetState(s, RAN)) {//正常情况下设置状态为以完成
+                    result = v;//记录result
+                    releaseShared(0);//释放共享锁
+                    done();//执行扩展方法done
+                    return;
+                }//如果CAS设置失败，则自旋再次尝试
+            }
+        }
+
+另一方面，当提交了FutureTask之后想要获取结果就需要调用get()方法：
+
+	public V get() throws InterruptedException, ExecutionException {
+        return sync.innerGet();
+    }
+
+	V innerGet() throws InterruptedException, ExecutionException {
+            acquireSharedInterruptibly(0);
+            if (getState() == CANCELLED)
+                throw new CancellationException();
+            if (exception != null)
+                throw new ExecutionException(exception);
+            return result;
+        }
+
+从代码上看就非常简单了，首先获取共享锁，获取过程中接受中断；获取锁后发现状态为取消，则抛出CancellationException；如果有异常说明FutureTask执行失败，抛出ExecutionException异常；如果执行正常，返回结果。
+
+get方法还接收带超时时间的参数，唯一的区别就在于获取共享锁的时候带超时时间。
+
+	public V get(long timeout, TimeUnit unit)
+        throws InterruptedException, ExecutionException, TimeoutException {
+        return sync.innerGet(unit.toNanos(timeout));
+    }
+
+FutureTask与直接使用线程池最大的不同在于，FutureTask可以取消，下面来看一下取消方法：
+
+	public boolean cancel(boolean mayInterruptIfRunning) {
+        return sync.innerCancel(mayInterruptIfRunning);
+    }
+
+	boolean innerCancel(boolean mayInterruptIfRunning) {
+            for (;;) {
+                int s = getState();
+                if (ranOrCancelled(s))
+                    return false;
+                if (compareAndSetState(s, CANCELLED))
+                    break;
+            }
+            if (mayInterruptIfRunning) {
+                Thread r = runner;
+                if (r != null)
+                    r.interrupt();
+            }
+            releaseShared(0);
+            done();
+            return true;
+        }
+
+取消方法带一个参数mayInterruptIfRunning，来表示是否可以在任务运行时中断任务。
+
+在innerCancel方法中首先自旋+CAS设置CANCELLED状态，成功之后根据需要中断线程，释放共享锁，最后执行扩展方法done()。这里注意一下返回值代表是否取消成功，如果当前状态是Ran(执行完毕)或CANCELLED的话，会直接返回false，表示取消失败。
+
+最后，FutureTask还附带了runAndReset跑完重置方法，不过由于可见性设置的是protected，所以只会被用在线程池内部用来反复执行任务。
 
