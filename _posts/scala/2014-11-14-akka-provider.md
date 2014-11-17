@@ -11,6 +11,9 @@ akka中的Provider是所有actor挂载的地方，按照akka的使用场景分�
  2. akka.remote.RemoteActorRefProvider (远程调用场景)
  3. akka.cluster.ClusterActorRefProvider (集群场景)
 
+LocalActorRefProvider
+--------------------------
+
 下面首先对LocalActorRefProvider进行介绍。在之前分析ActorSystem初始化的时候可以知道Provider会随着ActorSystem的初始化而创建：
 
 	class ActorSystemImpl...
@@ -282,7 +285,30 @@ provider的actorOf方法实在太长，根据props中的deploy部分通过一个
 
 接下来会获取dispatcher和mailboxType，判断如果需要异步执行Actor则创建RepointableActorRef，如果是同步执行，则直接创建LocalActorRef。这期间遇到任何异常都会抛出。
 
+异步创建RepointableActorRef的过程我会单独在一篇笔记中介绍。
 
+下面来看一下actorSelection的实现，因为无论是ActorSystem.actorSelection还是是每一个Actor内调用context.actorSelection由于继承关系，实际上调用的都是ActorRefFactory的方法：
+
+	trait ActorRefFactory...
+	
+	def actorSelection(path: String): ActorSelection = path match {
+      case RelativeActorPath(elems) ⇒
+        if (elems.isEmpty)   ActorSelection(provider.deadLetters, "")
+        else if (elems.head.isEmpty) ActorSelection(provider.rootGuardian, elems.tail)
+        else ActorSelection(lookupRoot, elems)
+      case ActorPathExtractor(address, elems) ⇒
+        ActorSelection(provider.rootGuardianAt(address), elems)
+      case _ ⇒
+        ActorSelection(provider.deadLetters, "")
+    }
+
+分为三种情况：
+
+ - 最常见的相对路径，
+ - 形如akka://systemName/user/myActor 的绝对路径
+ - 无效路径
+ 
+ 最终返回ActorSelection对象。
 
 
 
