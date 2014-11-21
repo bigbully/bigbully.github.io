@@ -63,19 +63,63 @@ root节点的addValue方法有两个步骤：
 
 	protected def innerAddValue(key: K, value: V): Changes = {
       var found = false
-      val ch = subkeys flatMap { n ⇒   //遍历root节点的nonroot子节点
+      val ch = subkeys flatMap { n ⇒   
         if (sc.isSubclass(key, n.key)) {
           found = true
           n.innerAddValue(key, value)
         } else Nil
       }
+
+      //--------分割线---------//
       if (!found) {
         val v = values + value
         val n = new Nonroot(root, key, v)
-        integrate(n) ++ n.innerAddValue(key, value) :+ (key -> v)
+        integrate(n) ++ n.innerAddValue(key, value) :+ (key -> v) 
       } else ch
     }
 
+这个方法着实让人头大，但我还是硬着头皮往下分析。姑且把他分为上下两个部分，首先来看下半部分。
+
+当我们第一次添加一个新的subscriber时，subkeys代表root的节点的所有nonroot节点的集合，新的subscriber自然不包含在subkeys内，found=false。成功进入下半部分。
+
+val v = values + value获得包含新的subscriber的集合v，然后创建Nonroot，Nonroot的3个参数分别表示root的引用，当前Nonroot节点的Classifier，以及这个新构建的集合v，v中包含新的subscriber。
+
+之后要执行integrate方法，这个方法实现如下：
+
+	private def integrate(n: Nonroot[K, V]): Changes = {
+      val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))
+      subkeys = sub :+ n
+      n.subkeys = if (subsub.nonEmpty) subsub else n.subkeys
+      n.subkeys ++= findSubKeysExcept(n.key, n.subkeys).map(k ⇒ new Nonroot(root, k, values))
+      n.subkeys.map(n ⇒ (n.key, n.values.toSet))
+    }
+
+
+由于这个方法，是在root内部调用的，所以这里的subkeys指代root下的所有nonroot节点。
+
+val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))把这些节点一份为二。subsub代表root的所有nonroot节点中是新的Nonroot节点Classifier的子类或同类，sub表示root的所有nonroot节点中的其他不相干节点。
+
+重点来了，新的Nonroot节点的Classifier作为subsub的父类或同类完全可以代替subsub，果断把root的subkeys重置为sub :+ n。从这一点可以看出，其实subsub只保存了新的Nonroot节点的Classifier的子类， 因为root的subkeys中不可能同一个类和他的子类。
+
+因为subsub是新的Nonroot节点的Classifier的子类，所以如果subsub不为空，则把他赋给n.subkeys。
+
+之后执行findSubKeysExcept(n.key, n.subkeys)方法：
+
+	  protected final def findSubKeysExcept(key: K, except: Vector[Nonroot[K, V]]): Set[K] = root.innerFindSubKeys(key, except)
+	  protected def innerFindSubKeys(key: K, except: Vector[Nonroot[K, V]]): Set[K] =
+    (Set.empty[K] /: subkeys) { (s, n) ⇒
+      if (sc.isEqual(key, n.key)) s
+      else n.innerFindSubKeys(key, except) ++ {
+        if (sc.isSubclass(n.key, key) && !except.exists(e ⇒ sc.isEqual(key, e.key)))
+          s + n.key
+        else
+          s
+      }
+    }
+
+这个方法会主动调用root.innerFindSubKeys(key, except)，会从root的subkeys中找出那些不属于“新的Nonroot节点的Classifier的子类”（n.subkeys）的subkey。特别注意，这个方法中会便利所有root的子类，并递归的查找这些子类的子类，试图找到他们中不属于“新的Nonroot节点的Classifier的子类”的类。最后一并返回。
+
+回到integrate方法，当findSubKeysExcept(n.key, n.subkeys)找到了所有新加的Classifier的子类，把他们转化成Nonroot，添加到n.subkeys中。
 
 									
 
