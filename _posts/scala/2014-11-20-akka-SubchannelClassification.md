@@ -21,6 +21,18 @@ EventStream是akka中的日志发布订阅的入口，他发布的event，是针
 
 SubchannelClassification特质最主要的属性，莫过于这个lazy的subscriptions了。因为我们知道EventStream在ActorSystem中是单例的，所以在EventStream创建的时候，并触发发布或订阅事件时，subscriptions这个对象会被创建，EventStream中的这个SubclassifiedIndex类型的subscriptions会作为全局唯一的root节点，这一点非常重要。对于非root节点，会表示为Nonroot，他是SubclassifiedIndex的子类。
 
+	class SubclassifiedIndex[K, V] private (protected var values: Set[V])(implicit sc: Subclassification[K]) {
+
+	protected var subkeys = Vector.empty[Nonroot[K, V]]
+	protected val root = this
+
+	}
+SubclassifiedIndex类有三个属性非常重要：
+
+ 1. root永远指向root节点
+ 2. values表示当前节点所有的subscriber
+ 3. subkeys表示当前节点所有的子节点Nonroot
+
 另外，由于EventStream混入的EventBus特质要求实现类需要定义3种类型：
 
 	type Event//事件
@@ -42,6 +54,22 @@ SubclassifiedIndex会把新增key或新增value的结果抽象为一个类型Cha
 
 铺垫的差不多了，所以先来看看是如何注册subscriber的吧。
 
+举一个典型场景，以下有三个带继承关系的类，分别是：
+
+	class Person(name:String)
+	class Teacher(name:String) extends Person(name)
+	class Professor(name:String) extends Teacher(name)
+
+假设我们要 依次 订阅这三种类型的事件：
+
+	eventStream.subscribe(new Subscriber(1), classOf[Professor])
+	eventStream.subscribe(new Subscriber(2), classOf[Teacher])
+	eventStream.subscribe(new Subscriber(3), classOf[Person])
+
+
+
+会是怎样一个流程呢？从subscribe这个方法看起。
+
 	trait SubchannelClassification...
 
 	def subscribe(subscriber: Subscriber, to: Classifier): Boolean = subscriptions.synchronized {
@@ -57,7 +85,7 @@ SubclassifiedIndex会把新增key或新增value的结果抽象为一个类型Cha
 root节点的addValue方法有两个步骤：
 
  1. 执行innerAddValue方法，找到不同Classifier对应的Subscriber集合。注意root节点和Nonroot节点的innerAddValue是不同的。
- 2. 执行mergeChangesByKey方法，根据Classifier进行merge。
+ 2. 执行mergeChangesByKey方法，会把innerAddValue的结果按照Classifier进行merge。
 
 下面先来看看root节点的innerAddValue方法：
 
@@ -78,13 +106,13 @@ root节点的addValue方法有两个步骤：
       } else ch
     }
 
-这个方法着实让人头大，但我还是硬着头皮往下分析。姑且把他分为上下两个部分，首先来看下半部分。
+这个方法非常重要，我把他分为上下两个部分，首先来看下半部分。
 
-当我们第一次添加一个新的subscriber时，subkeys代表root的节点的所有nonroot节点的集合，新的subscriber自然不包含在subkeys内，found=false。成功进入下半部分。
+每次订阅一个新的类，都会首先在root节点上调用innerAddValue这个方法，所以subkeys代表root的节点的所有nonroot节点的集合，新订阅的Professor这个类自然不包含在subkeys内，found=false。成功进入下半部分。
 
-val v = values + value获得包含新的subscriber的集合v，然后创建Nonroot，Nonroot的3个参数分别表示root的引用，当前Nonroot节点的Classifier，以及这个新构建的集合v，v中包含新的subscriber。
+在root中values这个变量永远是空得，val v = values + value获得包含Subscirber1的集合v，然后创建Nonroot，Nonroot的3个参数分别表示root的引用，当前Nonroot节点的Classifier Professor，以及这个新构建的包含Subscirber1的集合v。
 
-之后要执行integrate方法，这个方法实现如下：
+之后要执行root的integrate方法，这个方法实现如下：
 
 	private def integrate(n: Nonroot[K, V]): Changes = {
       val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))
@@ -94,16 +122,33 @@ val v = values + value获得包含新的subscriber的集合v，然后创建Nonro
       n.subkeys.map(n ⇒ (n.key, n.values.toSet))
     }
 
+val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))会把root保存的所有子节点一份为二。subsub代表这些子节点中Perfessor的子类，sub表示这些节点中其他不相干类。注意的判断条件isSubclass虽然表示包含Professor类和他的子类，还记得之前华丽的分割线吗，如果发现在subkeys中发现有Professor类，就不会进入下半部分了。所以这里的subsub就指代Professor的子类。
 
-由于这个方法，是在root内部调用的，所以这里的subkeys指代root下的所有nonroot节点。
+重点来了，接下来的 subkeys = sub :+ n，表示如果subkeys中存在Perfessor类或他的子类，则一并拿Professor代替。
 
-val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))把这些节点一份为二。subsub代表root的所有nonroot节点中是新的Nonroot节点Classifier的子类或同类，sub表示root的所有nonroot节点中的其他不相干节点。
+n.subkeys = if (subsub.nonEmpty) subsub else n.subkeys表示如果Professor的子类不为空，则把挂到Professorde subkeys下，这很合理。
 
-重点来了，新的Nonroot节点的Classifier作为subsub的父类或同类完全可以代替subsub，果断把root的subkeys重置为sub :+ n。从这一点可以看出，其实subsub只保存了新的Nonroot节点的Classifier的子类， 因为root的subkeys中不可能同一个类和他的子类。
+看到这里可以总结出来一个规则，订阅了Person和Professor，那么Professor会挂在Person的subkeys，因为Professor是Person得子类。这时如果订阅Teacher类，那么Teacher类会挂在Person的subkeys下，而Professor类会从Person的subkeys中移动到Teacher的subkeys中。
 
-因为subsub是新的Nonroot节点的Classifier的子类，所以如果subsub不为空，则把他赋给n.subkeys。
+因为这个规则有些绕，通过这个例子应该可以表达清楚了。
 
-之后执行findSubKeysExcept(n.key, n.subkeys)方法：
+也有可能出现这种情况：
+
+	trait Person
+	trait Male 
+	class Professor extends Person with Male
+
+	eventStream.subscribe(new Subscriber(1), classOf[Professor])
+	eventStream.subscribe(new Subscriber(2), classOf[Person])
+	eventStream.subscribe(new Subscriber(3), classOf[Male])
+	
+如果首先订阅了Person和Professor类，再订阅Male特质，因为Male特质与Person没有继承关系，所以会进入到分割线的下半部分，但在root的subkeys找到自己的Perfessor类，因为Perfessor类会挂在Person的subkeys下。
+
+所以就需要引入下面的逻辑：
+
+	n.subkeys ++= findSubKeysExcept(n.key, n.subkeys).map(k ⇒ new Nonroot(root, k, values))
+
+findSubKeysExcept方法如下：
 
 	  protected final def findSubKeysExcept(key: K, except: Vector[Nonroot[K, V]]): Set[K] = root.innerFindSubKeys(key, except)
 	  protected def innerFindSubKeys(key: K, except: Vector[Nonroot[K, V]]): Set[K] =
@@ -117,15 +162,82 @@ val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))把这�
       }
     }
 
-这个方法会主动调用root.innerFindSubKeys(key, except)，会从root的subkeys中找出那些不属于“新的Nonroot节点的Classifier的子类”（n.subkeys）的subkey。特别注意，这个方法中会便利所有root的子类，并递归的查找这些子类的子类，试图找到他们中不属于“新的Nonroot节点的Classifier的子类”的类。最后一并返回。
+这个方法会调用root开始，递归的查找所有子节点中是否有当前节点的子类，但又不包含已经放入当前节点subkeys中的那一部分类。之后把找到的结果用map转成Nonroot，挂在当前节点的subkeys上。
 
-回到integrate方法，当findSubKeysExcept(n.key, n.subkeys)找到了所有新加的Classifier的子类，把他们转化成Nonroot，添加到n.subkeys中。
+n.subkeys.map(n ⇒ (n.key, n.values.toSet))方法把Perfessor所有的子节点转化成子类和子类的Subscriber集合返回。
 
-									
+综上所述，integrate方法主要用来整理新订阅的Perfessor类的subkeys，并返回subkeys中的整理结果。
+
+回到root节点的innerAddValue方法，在执行完integrate返回结果后，需要调用n.innerAddValue(key, value)。
+
+	class Nonroot...
+
+	override def innerAddValue(key: K, value: V): Changes = {
+      // break the recursion on super when key is found and transition to recursive add-to-set
+      if (sc.isEqual(key, this.key)) addValue(value) else super.innerAddValue(key, value)
+    }
+
+    private def addValue(value: V): Changes = {
+      val kids = subkeys flatMap (_ addValue value)
+      if (!(values contains value)) {
+        values += value
+        kids :+ ((key, Set(value)))
+      } else kids
+    }
+
+还记得之前提到过的分割线吗，因为从下半部分逻辑调用innerAddValue时，
+key, this.key必然相等，所以直接进入addValue方法。在这里会递归的在Perfessor的子类中添加Subscriber（如果子类没有被这个Subscriber订阅过的话），并把添加的结果返回。
+
+回到root的innerAddValue方法，最后会把integrate(n)的结果，n.innerAddValue(key, value)的结果，以及当前订阅的(key -> v)，三者合并后返回。
+
+Professor，Teacher，Person按照这种顺序进行订阅的话，每一个类都会按照刚才介绍的逻辑添加。不过如果按照Person，Teacher， Professor的顺序订阅会怎么样呢？
+
+订阅第Person类时仍然会从分割线下半部分的逻辑进行。但是当订阅Teacher类时，遍历root.subkeys会发现Teacher类是Person的子类，然后执行n.innerAddValue(key, value)，这里的n就是封装着Person类的Nonroot，并调用super.innerAddValue(key, value)方法，再次遍历Person类的subkeys，从而进入分割线下半部分的逻辑，但此时subkeys指代的是Person的subkeys，也就是最终会把Teacher挂到Person的subkeys下面。
+
+Person，Teacher， Professor的顺序订阅就会依次把自己挂到父类的subkeys中。
+
+可喜的是取消订阅的逻辑就是订阅逻辑的逆过程，所以在这里就不用进行分析了。
+
+来看看如何发布一个事件：
+
+	trait SubchannelClassification...
+
+	def publish(event: Event): Unit = {
+      val c = classify(event)
+      val recv =
+        if (cache contains c) cache(c) // c will never be removed from cache
+        else subscriptions.synchronized {
+          if (cache contains c) cache(c)
+          else {
+            addToCache(subscriptions.addKey(c))
+            cache(c)
+          }
+        }
+      recv foreach (publish(event, _))
+    }  
+
+publish方法分为首先需要查找当前事件对应的类是否有Subscriber，经过加锁和double check之后仍然没有发现Subscriber，会按继承关系把当前事件的类添加到合适的位置。获得所有Subscriber后，依次调用publish(event, subscriber)方法发送事件，这里的publish方法根据业务的不同而留给SubchannelClassification的实现类去实现的。
 
 
+	def addKey(key: K): Changes = mergeChangesByKey(innerAddKey(key))
 
-	
+	protected def innerAddKey(key: K): Changes = {
+      var found = false
+      val ch = subkeys flatMap { n ⇒
+        if (sc.isEqual(key, n.key)) {
+          found = true
+          Nil
+        } else if (sc.isSubclass(key, n.key)) {
+          found = true
+          n.innerAddKey(key)
+        } else Nil
+      }
+      if (!found) {
+        integrate(new Nonroot(root, key, values)) :+ ((key, values))
+      } else ch
+    }
+
+在这里几乎不用逐句分析，因为逻辑和innerAddValue太相像了。在遍历root.subkeys的过程中如果遇到自己的父类，就需要进行递归。如果found == false时，会把新建的Nonroot作为参数调用integrate方法。
 
 
 
