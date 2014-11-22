@@ -126,7 +126,64 @@ addLogger方法会把日志收集类作为一个SystemActor挂到ActorSystem中�
 
 在这里会根据配置信息akka.actor.debug.unhandled决定是否创建一个SystemActor，来接受并转手发布Debug级别的事件来记录UnhandledMessage。UnhandledMessage用来指发送到某个Actor的消息但是Actor并没有在receive方法中设置接收这种类型的消息。
 
+publish，subscribe和unsubscirbe的具体实现在[SubchannelClassification](http://bigbully.github.io/akka-SubchannelClassification/)中有详细分析。
 
+EventStream的所有Subscriber都是ActorRef，而Event则是Logging.LogEvent。EventStream的publish操作如下：
+
+	protected def publish(event: AnyRef, subscriber: ActorRef) = {
+	  if (subscriber.isTerminated) unsubscribe(subscriber)
+      else subscriber ! event
+    }
+
+只不过是向Subscriber发送一条消息而已，非常简单。
+
+那么怎么才能触发publish操作呢，参考下面这个Actor：
+
+	class MyAct extends Actor with ActorLogging{
+
+	  override def receive: Actor.Receive = {
+	    case "START" => log.info("start") 
+	  }
+	}
+
+任何一个Actor都可以混入ActorLogging特质，之后就可以调用ActorLogging中的log方法。
+
+
+	trait ActorLogging { this: Actor ⇒
+	  private var _log: LoggingAdapter = _
+
+	  def log: LoggingAdapter = {
+	    // only used in Actor, i.e. thread safe
+	    if (_log eq null)
+	      _log = akka.event.Logging(context.system, this)
+	    _log
+	  }
+	}
+
+log方法会创建一个_log对象，并在保存下来，放置重复创建。
+
+	object Logging...
+	
+	def apply[T: LogSource](system: ActorSystem, logSource: T): LoggingAdapter = {
+      val (str, clazz) = LogSource(logSource, system)
+      new BusLogging(system.eventStream, str, clazz)
+	}
+
+_log对象实际上是一个BusLogging对象。而当我们调用_log.info("")时，调用的trait LoggingAdapter中的info方法：
+
+	trait LoggingAdapter...
+	
+	def info(message: String) { if (isInfoEnabled) notifyInfo(message) }
+
+看到了吗，每一次调用都已经判断了isInfoEnabled，不用担心无意义的日志产出。
+
+而notifyInfo方法是在class BusLogging中实现的：
+
+	class BusLogging...
+	
+	protected def notifyInfo(message: String): Unit = bus.publish(Info(logSource, logClass, message, mdc))
+
+这下发现所有逻辑都串上了是吧。EventStream就暂时分析到这里了。
 
 
 
