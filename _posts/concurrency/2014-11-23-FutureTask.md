@@ -180,7 +180,7 @@ state为NEW确认无误后执行Callable任务并获得返回值。这里通过r
 而把WaitNode引用的thread置空是作为在等待中被中断的标志。在removeWaiter方法中遍历所有WaitNode时如果检查到有的WaitNode引用的thread为空，则把它剔除出队列。如果发现队列头的WaitNode引用的thread为空，则会通过cas设置队列头的位置。
 	
 
-1.异常退出
+2.异常退出
 -------------
     
 异常退出与正常退出唯一的区别在于不执行set方法设置返回值，而是执行setException方法设置异常信息，除此之外没有任何区别。
@@ -191,5 +191,55 @@ state为NEW确认无误后执行Callable任务并获得返回值。这里通过r
             UNSAFE.putOrderedInt(this, stateOffset, EXCEPTIONAL); // final state
             finishCompletion();
         }
+    }
+
+
+3.任务取消&中断
+---------------
+
+这两个过程实际上都在cancel方法中完成。
+
+	 public boolean cancel(boolean mayInterruptIfRunning) {
+        if (state != NEW)
+            return false;
+        if (mayInterruptIfRunning) {
+            if (!UNSAFE.compareAndSwapInt(this, stateOffset, NEW, INTERRUPTING))
+                return false;
+            Thread t = runner;
+            if (t != null)
+                t.interrupt();
+            UNSAFE.putOrderedInt(this, stateOffset, INTERRUPTED); // final state
+        }
+        else if (!UNSAFE.compareAndSwapInt(this, stateOffset, NEW, CANCELLED))
+            return false;
+        finishCompletion();
+        return true;
+    }
+
+在run方法的finally有这么一段：
+
+	class FutureTask@run...
+	
+	int s = state;
+    if (s >= INTERRUPTING)
+        handlePossibleCancellationInterrupt(s);
+
+
+	private void handlePossibleCancellationInterrupt(int s) {
+        // It is possible for our interrupter to stall before getting a
+        // chance to interrupt us.  Let's spin-wait patiently.
+        if (s == INTERRUPTING)
+            while (state == INTERRUPTING)
+                Thread.yield(); // wait out pending interrupt
+
+        // assert state == INTERRUPTED;
+
+        // We want to clear any interrupt we may have received from
+        // cancel(true).  However, it is permissible to use interrupts
+        // as an independent mechanism for a task to communicate with
+        // its caller, and there is no way to clear only the
+        // cancellation interrupt.
+        //
+        // Thread.interrupted();
     }
 
