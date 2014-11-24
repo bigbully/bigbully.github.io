@@ -1,8 +1,8 @@
 ---
 layout: post
-title: Nimbus
+title: Try的使用
 description: 
-category: storm
+category: scala
 ---
 
 考虑一道题，我们从控制台输入获得除数和被除数，最后算出整除的结果。显然需要考虑除数和被除数必须是整数，除数还必须不能为零。我们可以用以下的算法：
