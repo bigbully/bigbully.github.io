@@ -30,7 +30,7 @@ FutureTask共包括以上七种状态，由此而生了以下4种状态变迁：
 
 看来如果我能搞明白这四种状态变迁分别是如何做到的，那么我有理由说我对新版的FutureTask有了完整的认识。
 
-1.正常完成
+1.正常退出
 -------------
 
 当FutureTask被构造时，state状态会首先被设置成NEW
@@ -84,8 +84,55 @@ run方法首先会判断当前状态是否为NEW，然后通过cas设置runner�
 
 state为NEW确认无误后执行Callable任务并获得返回值。这里通过ran这个变量来记录当前任务是否成功执行。
 
-接下来在set方法中会用cas设置把state变更为COMPLETING
-	
+接下来在set方法中会用cas设置把state变更为COMPLETING，设置返回结果，变更状态为NORMAL，最后执行finishCompletion方法。这里的cas之所以没包括在自旋中，主要是因为只有执行线程才有可能调用，不存在线程争抢的可能。
+
+	private void finishCompletion() {
+        // assert state > COMPLETING;
+        for (WaitNode q; (q = waiters) != null;) {
+            if (UNSAFE.compareAndSwapObject(this, waitersOffset, q, null)) {
+                for (;;) {
+                    Thread t = q.thread;
+                    if (t != null) {
+                        q.thread = null;
+                        LockSupport.unpark(t);
+                    }
+                    WaitNode next = q.next;
+                    if (next == null)
+                        break;
+                    q.next = null; // unlink to help gc
+                    q = next;
+                }
+                break;
+            }
+        }
+
+        done();
+
+        callable = null;        // to reduce footprint
+    }
+
+在finishCompletion外层的使用for循环进行自旋，然后通过cas把保存在等待队列队首的元素置空，接下来把等待队列中所有的线程唤醒。所有这些工作完毕后会执行用于扩展的done方法。
+
+对于其他执行get方法的线程是如何加入到等待队列中的呢？
+
+	public V get() throws InterruptedException, ExecutionException {
+        int s = state;
+        if (s <= COMPLETING)
+            s = awaitDone(false, 0L);
+        return report(s);
+    }
+
+
+1.异常退出
+-------------
     
-   
+异常退出与正常退出唯一的区别在于不执行set方法设置返回值，而是执行setException方法设置异常信息，除此之外没有任何区别。
+
+	protected void setException(Throwable t) {
+        if (UNSAFE.compareAndSwapInt(this, stateOffset, NEW, COMPLETING)) {
+            outcome = t;
+            UNSAFE.putOrderedInt(this, stateOffset, EXCEPTIONAL); // final state
+            finishCompletion();
+        }
+    }
 
