@@ -111,7 +111,7 @@ state为NEW确认无误后执行Callable任务并获得返回值。这里通过r
         callable = null;        // to reduce footprint
     }
 
-在finishCompletion外层的使用for循环进行自旋，然后通过cas把保存在等待队列队首的元素置空，接下来把等待队列中所有的线程唤醒。所有这些工作完毕后会执行用于扩展的done方法。
+在finishCompletion外层的使用for循环进行自旋，这个自旋用来保证可以通过cas把当前FutureTask对waiters的引用解除。之后把等待队列中所有的WaitNode引用的thread置空，最后线程唤醒。所有这些工作完毕后会执行用于扩展的done方法。
 
 对于其他执行get方法的线程是如何加入到等待队列中的呢？
 
@@ -122,6 +122,63 @@ state为NEW确认无误后执行Callable任务并获得返回值。这里通过r
         return report(s);
     }
 
+这里检查如果当前状态表示FutureTask没有执行完，则进入等待完成的状态，直到被唤醒，最后返回任务执行结果。
+
+来看看如何进入等待队列的：
+
+	private int awaitDone(boolean timed, long nanos)
+        throws InterruptedException {
+        final long deadline = timed ? System.nanoTime() + nanos : 0L;
+        WaitNode q = null;
+        boolean queued = false;
+        for (;;) {
+            if (Thread.interrupted()) {
+                removeWaiter(q);
+                throw new InterruptedException();
+            }
+
+            int s = state;
+            if (s > COMPLETING) {
+                if (q != null)
+                    q.thread = null;
+                return s;
+            }
+            else if (s == COMPLETING) // cannot time out yet
+                Thread.yield();
+            else if (q == null)
+                q = new WaitNode();
+            else if (!queued)
+                queued = UNSAFE.compareAndSwapObject(this, waitersOffset,
+                                                     q.next = waiters, q);
+            else if (timed) {
+                nanos = deadline - System.nanoTime();
+                if (nanos <= 0L) {
+                    removeWaiter(q);
+                    return state;
+                }
+                LockSupport.parkNanos(this, nanos);
+            }
+            else
+                LockSupport.park(this);
+        }
+    }
+
+这个方法总结成一句话就是，每走一步都要重新判断状态。
+
+这里的状态包括：
+
+ 1. 是否中断
+ 2. 任务是否执行完成
+ 3. 任务是否即将完成
+ 4. 是否需要创建度列中的WaitNode
+ 5. 是否需要加入到队列中，放入队列中也很讲究，因为waiters只表示这个队列的队首，每次新创建的WaitNode会通过cas放入队列的队首。
+ 
+最终线程被挂起。
+
+这里需要特别注意的是，如果等待的线程是获得任务执行结果后正常被唤醒的，那么他不会主动把自己从队列中移除，而仅仅是把WaitNode引用的thread设置为null。如果所有等待在队列中的线程都正常获得结果，那么WaitNode虽然彼此之前有可能还持有对方的引用，但是不再与FutureTask有关联，会被回收掉。
+
+而把WaitNode引用的thread置空是作为在等待中被中断的标志。在removeWaiter方法中遍历所有WaitNode时如果检查到有的WaitNode引用的thread为空，则把它剔除出队列。如果发现队列头的WaitNode引用的thread为空，则会通过cas设置队列头的位置。
+	
 
 1.异常退出
 -------------
