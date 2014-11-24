@@ -92,9 +92,6 @@ pre ol{margin-left:25px;list-style-type:decimal;}
 .spark .aside{
     background-image:url(../images/192338.jpg)
 }
-.storm .aside {
-    background-image:url(../images/sdf1fd.jpeg)
-}
 .index-content .section { margin-left:30%; padding-top:80px; padding-right:15%; ;}
 
 .index-content .artical-list { width:70%; margin:0 auto; }
