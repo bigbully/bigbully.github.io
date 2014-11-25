@@ -4,13 +4,11 @@ title: akka-SubchannelClassification笔记
 description: 
 category: scala
 ---
-SubchannelClassification是我看Akka源码到现在遇到的最复杂的结构。他作为一个工具类扩展了发布订阅模式，增加了订阅者自动关注发布内容子类的功能。
+SubchannelClassification是Akka用到的一个工具类，他扩展了发布订阅模式，增加了订阅者自动关注发布内容子类的功能。
 
-在开始写这篇笔记时我并没有完全看懂代码，但是我发现，如果我不把我看的懂的那一部分先记下来，我很快就会迷失在纷乱的代码中。
+虽然SubchannelClassification在akka中绝大多数时候只是用来做日志的发布和订阅，但设计者把他做了更高层次的抽象。我认为对于jvm内部的发布订阅这事一个很好的实践。
 
-SubchannelClassification在akka中只用来做日志的发布和订阅，但设计者把他抽象出来，使用一切发布订阅模式。
-
-EventStream是akka中的日志发布订阅的入口，他发布的event，是针对于不同级别的log日志。例如EventStream发布了Error级别的Event，那么所有订阅了Error级别的subscriber就会收到日志信息。EventStream混入了SubchannelClassification是为了处理日志级别的子类，包含MDC（Mapped Diagnostic Context由map存储的日志上下文诊断信息）的日志级别。举个例子，当subscriber订阅了Error级别的日志后，当有带MDC的Error级别日志发布时，subscriber依然能收到日志信息。抽象之后就是订阅了类型A的subscriber可以收到任何A的子类的事件。
+针对于日志的发布和订阅，akka中的EventStream实现了SubchannelClassification。他可以用来发布不同级别的log event。例如EventStream发布了Error级别的Event，那么所有订阅了Error级别的subscriber就会收到日志信息。EventStream混入了SubchannelClassification是为了处理日志级别的子类，包含MDC（Mapped Diagnostic Context由map存储的日志上下文诊断信息）的日志。举个例子，当subscriber订阅了Error级别的日志后，当有带MDC的Error级别日志发布时，subscriber依然能收到日志信息。即抽象之后就是订阅了类型A的subscriber可以收到任何A的子类的事件。
 
 	trait SubchannelClassification { this: EventBus ⇒
 		
@@ -19,7 +17,9 @@ EventStream是akka中的日志发布订阅的入口，他发布的event，是针
 	}
 
 
-SubchannelClassification特质最主要的属性，莫过于这个lazy的subscriptions了。因为我们知道EventStream在ActorSystem中是单例的，所以在EventStream创建的时候，并触发发布或订阅事件时，subscriptions这个对象会被创建，EventStream中的这个SubclassifiedIndex类型的subscriptions会作为全局唯一的root节点，这一点非常重要。对于非root节点，会表示为Nonroot，他是SubclassifiedIndex的子类。
+混入了SubchannelClassification特质的EventStream在ActorSystem中是单例的，SubchannelClassification特质中有一个SubclassifiedIndex类型的subscriptions属性。由于SubclassifiedIndex类包装了每一个事件类型，因为事件类型本身可能存在继承关系，所以在SubchannelClassification中就存在一个事件类型树。
+
+subscriptions这个属性就是全局唯一的事件类型树的root节点，他是所有事件类型加载到事件类型树的入口。对于其他事件类型节点，会表示为Nonroot，他是SubclassifiedIndex的子类。
 
 	class SubclassifiedIndex[K, V] private (protected var values: Set[V])(implicit sc: Subclassification[K]) {
 
@@ -27,21 +27,19 @@ SubchannelClassification特质最主要的属性，莫过于这个lazy的subscri
 	protected val root = this
 
 	}
-SubclassifiedIndex类有三个属性非常重要：
+SubclassifiedIndex类有三个属性：
 
  1. root永远指向root节点
  2. values表示当前节点所有的subscriber
  3. subkeys表示当前节点所有的子节点Nonroot
 
-另外，由于EventStream混入的EventBus特质要求实现类需要定义3种类型：
+另外，由于EventStream混入的EventBus特质要求实现类定义3种类型：
 
 	type Event//事件
 	type Classifier//订阅的事件的类型
     type Subscriber//订阅者的类型
 
 在	EventStream中，Event类型为AnyRef，Classifier类型为Class[_]，Subscriber类型为ActorRef。Classifier和Subscriber同时又是SubclassifiedIndex中的Key和Value。
-
-SubclassifiedIndex会把新增key或新增value的结果抽象为一个类型Changes，它实际上是immutable.Seq[(K, Set[V])]的别名，用来表示Classifier与众多Subscriber对应关系组成的集合。
 
 另外一个需要提到的类是Subclassification，还需要实现以下两个方法：
 
@@ -87,6 +85,8 @@ root节点的addValue方法有两个步骤：
  1. 执行innerAddValue方法，找到不同Classifier对应的Subscriber集合。注意root节点和Nonroot节点的innerAddValue是不同的。
  2. 执行mergeChangesByKey方法，会把innerAddValue的结果按照Classifier进行merge。
 
+注意SubclassifiedIndex会把新增key或新增value的结果抽象为一个类型Changes，它实际上是immutable.Seq[(K, Set[V])]的别名，用来表示Classifier与众多Subscriber对应关系组成的集合。
+
 下面先来看看root节点的innerAddValue方法：
 
 	protected def innerAddValue(key: K, value: V): Changes = {
@@ -106,11 +106,11 @@ root节点的addValue方法有两个步骤：
       } else ch
     }
 
-这个方法非常重要，我把他分为上下两个部分，首先来看下半部分。
+因为这个方法逻辑比较复杂，我把他分为上下两个部分，首先来看下半部分。
 
-每次订阅一个新的类，都会首先在root节点上调用innerAddValue这个方法，所以subkeys代表root的节点的所有nonroot节点的集合，新订阅的Professor这个类自然不包含在subkeys内，found=false。成功进入下半部分。
+这个方法中的subkeys代表了当前节点的所有子节点，由于每次订阅一个新的事件类型，都会首先在root节点上调用innerAddValue这个方法，所以这里的subkeys就代表了root的节点的所有nonroot节点的集合，新订阅的Professor类自然不包含在subkeys内，found=false。成功进入下半部分。
 
-在root中values这个变量永远是空得，val v = values + value获得包含Subscirber1的集合v，然后创建Nonroot，Nonroot的3个参数分别表示root的引用，当前Nonroot节点的Classifier Professor，以及这个新构建的包含Subscirber1的集合v。
+在root中values这个变量永远是空，val v = values + value获得包含Subscirber1的集合v，然后创建Nonroot，Nonroot的3个参数分别表示root的引用，当前Nonroot节点的Classifier，即Professor，以及这个新构建的包含Subscirber1的集合v。
 
 之后要执行root的integrate方法，这个方法实现如下：
 
@@ -122,17 +122,17 @@ root节点的addValue方法有两个步骤：
       n.subkeys.map(n ⇒ (n.key, n.values.toSet))
     }
 
-val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))会把root保存的所有子节点一份为二。subsub代表这些子节点中Perfessor的子类，sub表示这些节点中其他不相干类。注意的判断条件isSubclass虽然表示包含Professor类和他的子类，还记得之前华丽的分割线吗，如果发现在subkeys中发现有Professor类，就不会进入下半部分了。所以这里的subsub就指代Professor的子类。
+val (subsub, sub) = subkeys partition (k ⇒ sc.isSubclass(k.key, n.key))会把root保存的所有子节点一份为二。subsub代表这些子节点中Professor的子类，sub表示这些节点中其他不相干类。注意这里判断条件isSubclass虽然表示Professor类和他的子类，但还记得之前华丽的分割线吗，如果发现在subkeys中发现有Professor类，就不会进入下半部分了。所以这里的subsub就实际指代的是Professor的子类。
 
-重点来了，接下来的 subkeys = sub :+ n，表示如果subkeys中存在Perfessor类或他的子类，则一并拿Professor代替。
+重点来了，接下来的 subkeys = sub :+ n，表示如果subkeys中存在Professor类或他的子类，则一并拿Professor代替。
 
-n.subkeys = if (subsub.nonEmpty) subsub else n.subkeys表示如果Professor的子类不为空，则把挂到Professorde subkeys下，这很合理。
+n.subkeys = if (subsub.nonEmpty) subsub else n.subkeys表示如果Professor的子类不为空，则把挂到Professor的subkeys下，这很合理。
 
-看到这里可以总结出来一个规则，订阅了Person和Professor，那么Professor会挂在Person的subkeys，因为Professor是Person得子类。这时如果订阅Teacher类，那么Teacher类会挂在Person的subkeys下，而Professor类会从Person的subkeys中移动到Teacher的subkeys中。
+看到这里可以总结出来一个规则，如果订阅了Person和Professor，因为Professor是Person得子类，那么Professor会挂在Person的subkeys中。这时如果订阅Teacher类，那么Teacher类会挂在Person的subkeys下，而Professor类会从Person的subkeys中移动到Teacher的subkeys中。
 
 因为这个规则有些绕，通过这个例子应该可以表达清楚了。
 
-也有可能出现这种情况：
+比如有可能出现这种情况：
 
 	trait Person
 	trait Male 
@@ -142,7 +142,7 @@ n.subkeys = if (subsub.nonEmpty) subsub else n.subkeys表示如果Professor的�
 	eventStream.subscribe(new Subscriber(2), classOf[Person])
 	eventStream.subscribe(new Subscriber(3), classOf[Male])
 	
-如果首先订阅了Person和Professor类，再订阅Male特质，因为Male特质与Person没有继承关系，所以会进入到分割线的下半部分，但在root的subkeys找到自己的Perfessor类，因为Perfessor类会挂在Person的subkeys下。
+如果首先订阅了Person和Professor类，再订阅Male特质，因为Male特质与Person没有继承关系，所以会进入到分割线的下半部分，但在root的subkeys找到自己的Professor类，因为Professor类会挂在Person的subkeys下。
 
 所以就需要引入下面的逻辑：
 
@@ -162,11 +162,11 @@ findSubKeysExcept方法如下：
       }
     }
 
-这个方法会调用root开始，递归的查找所有子节点中是否有当前节点的子类，但又不包含已经放入当前节点subkeys中的那一部分类。之后把找到的结果用map转成Nonroot，挂在当前节点的subkeys上。
+这个方法会从root节点开始，递归的查找所有子节点中是否有当前节点的子类，但又不包含已经放入当前节点subkeys中的那一部分。之后把找到的结果用map转成Nonroot，挂在当前节点的subkeys上。
 
-n.subkeys.map(n ⇒ (n.key, n.values.toSet))方法把Perfessor所有的子节点转化成子类和子类的Subscriber集合返回。
+n.subkeys.map(n ⇒ (n.key, n.values.toSet))方法把Professor所有的子节点转化成子类和子类的Subscriber集合返回。
 
-综上所述，integrate方法主要用来整理新订阅的Perfessor类的subkeys，并返回subkeys中的整理结果。
+综上所述，integrate方法主要用来整理新订阅的Professor类的subkeys，并返回subkeys中的整理结果。
 
 回到root节点的innerAddValue方法，在执行完integrate返回结果后，需要调用n.innerAddValue(key, value)。
 
@@ -186,13 +186,13 @@ n.subkeys.map(n ⇒ (n.key, n.values.toSet))方法把Perfessor所有的子节点
     }
 
 还记得之前提到过的分割线吗，因为从下半部分逻辑调用innerAddValue时，
-key, this.key必然相等，所以直接进入addValue方法。在这里会递归的在Perfessor的子类中添加Subscriber（如果子类没有被这个Subscriber订阅过的话），并把添加的结果返回。
+key, this.key必然相等，所以直接进入addValue方法。在这里会递归的在Professor的子类中添加Subscriber（如果子类没有被这个Subscriber订阅过的话），并把添加的结果返回。
 
-回到root的innerAddValue方法，最后会把integrate(n)的结果，n.innerAddValue(key, value)的结果，以及当前订阅的(key -> v)，三者合并后返回。
+回到root的innerAddValue方法中，最后会把integrate(n)的结果，n.innerAddValue(key, value)的结果，以及当前订阅的(key -> v)，三者合并后返回。
 
 Professor，Teacher，Person按照这种顺序进行订阅的话，每一个类都会按照刚才介绍的逻辑添加。不过如果按照Person，Teacher， Professor的顺序订阅会怎么样呢？
 
-订阅第Person类时仍然会从分割线下半部分的逻辑进行。但是当订阅Teacher类时，遍历root.subkeys会发现Teacher类是Person的子类，然后执行n.innerAddValue(key, value)，这里的n就是封装着Person类的Nonroot，并调用super.innerAddValue(key, value)方法，再次遍历Person类的subkeys，从而进入分割线下半部分的逻辑，但此时subkeys指代的是Person的subkeys，也就是最终会把Teacher挂到Person的subkeys下面。
+订阅Person类时仍然会从分割线下半部分的逻辑进行。但是当订阅Teacher类时，遍历root.subkeys会发现Teacher类是Person的子类，然后执行n.innerAddValue(key, value)，这里的n就是封装着Person类的Nonroot，并调用super.innerAddValue(key, value)方法，再次遍历Person类的subkeys，从而进入分割线下半部分的逻辑，但此时subkeys指代的是Person的subkeys，也就是最终会把Teacher挂到Person的subkeys下面。
 
 Person，Teacher， Professor的顺序订阅就会依次把自己挂到父类的subkeys中。
 
@@ -216,7 +216,7 @@ Person，Teacher， Professor的顺序订阅就会依次把自己挂到父类的
       recv foreach (publish(event, _))
     }  
 
-publish方法分为首先需要查找当前事件对应的类是否有Subscriber，经过加锁和double check之后仍然没有发现Subscriber，会按继承关系把当前事件的类添加到合适的位置。获得所有Subscriber后，依次调用publish(event, subscriber)方法发送事件，这里的publish方法根据业务的不同而留给SubchannelClassification的实现类去实现的。
+publish方法分为首先需要查找当前事件对应的类是否有Subscriber，经过加锁和double check之后仍然没有发现Subscriber，会按继承关系把当前事件的类添加到合适的位置。获得所有Subscriber后，依次调用publish(event, subscriber)方法发送事件，这里的publish方法根据业务的不同而留给SubchannelClassification的实现类去实现的。顺便一提的是EventStream中的实现特别简单，就是actorRef ! event，大家一看就能明白了。
 
 
 	def addKey(key: K): Changes = mergeChangesByKey(innerAddKey(key))
@@ -237,7 +237,6 @@ publish方法分为首先需要查找当前事件对应的类是否有Subscriber
       } else ch
     }
 
-在这里几乎不用逐句分析，因为逻辑和innerAddValue太相像了。在遍历root.subkeys的过程中如果遇到自己的父类，就需要进行递归。如果found == false时，会把新建的Nonroot作为参数调用integrate方法。
+在这里几乎不用逐句分析，因为逻辑和innerAddValue太相像了。逻辑大致是：在遍历root.subkeys的过程中如果遇到自己的父类，就进行递归添加key。如果found=false时，会把新建的Nonroot作为参数调用integrate方法，integrate方法会整理当前类的subkeys，并返回整理结果。
 
-
-
+到此，这个带层级的发布订阅工具就分析完了。还是那句话，很难保证没有分析错误的地方，而且我认为在分析源码的文章中不粘贴代码是不可能的，但分析源码的文章毕竟只适合在IDE中浏览源码时作为参考来使用。
