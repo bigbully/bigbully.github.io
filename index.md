@@ -3,7 +3,7 @@ layout: home
 ---
 
 <div class="index-content concurrency">
-    <div class="section" style="display:none;">
+    <div class="section">
         <ul class="artical-cate">
             <li class="on" style="text-align:left"><a href="/"><span>Concurrency</span></a></li>
             <li style="text-align:left"><a href="/scala"><span>Scala</span></a></li>
