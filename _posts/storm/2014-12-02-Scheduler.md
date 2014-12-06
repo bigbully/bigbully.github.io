@@ -197,65 +197,68 @@ bad-slots方法如下：
 IsolationScheduler的schedule方法非常之长，让我们来一点一点进行分析：
 
 	(defn -schedule [this ^Topologies topologies ^Cluster cluster]
-	  (let [conf (container-get (.state this))        
-        orig-blacklist (HashSet. (.getBlacklistedHosts cluster))
-        iso-topologies (isolated-topologies conf (.getTopologies topologies))
-        iso-ids-set (->> iso-topologies (map #(.getId ^TopologyDetails %)) set)
-        topology-worker-specs (topology-worker-specs iso-topologies)
-        topology-machine-distribution (topology-machine-distribution conf iso-topologies)
-        host-assignments (host-assignments cluster)]
+	  (let [conf (container-get (.state this));;获取conf        
+        orig-blacklist (HashSet. (.getBlacklistedHosts cluster));;获取blacklist
+        iso-topologies (isolated-topologies conf (.getTopologies topologies));;从conf的ISOLATION-SCHEDULER-MACHINES中筛选出需要隔离的topology
+        iso-ids-set (->> iso-topologies (map #(.getId ^TopologyDetails %)) set);;获取隔离的topology的id
+        topology-worker-specs (topology-worker-specs iso-topologies);;获取隔离的topology对应的executor
+        topology-machine-distribution (topology-machine-distribution conf iso-topologies);;的出machine和worker的最佳分配
+        host-assignments (host-assignments cluster)];;获取当前集群中机器资源的分配情况
     (doseq [[host assignments] host-assignments]
-      (let [top-id (-> assignments first second)
-            distribution (get topology-machine-distribution top-id)
-            ^Set worker-specs (get topology-worker-specs top-id)
-            num-workers (count assignments)
+      (let [top-id (-> assignments first second);;从分配情况中获取topologyid
+            distribution (get topology-machine-distribution top-id);;获取理想情况下topology中machine和worker的最佳分配
+            ^Set worker-specs (get topology-worker-specs top-id);;获取这个topology对应的executor信息
+            num-workers (count assignments);;获取当前部署情况中的worker
             ]
-        (if (and (contains? iso-ids-set top-id)
-                 (every? #(= (second %) top-id) assignments)
-                 (contains? distribution num-workers)
-                 (every? #(contains? worker-specs (nth % 2)) assignments))
-          (do (decrement-distribution! distribution num-workers)
-              (doseq [[_ _ executors] assignments] (.remove worker-specs executors))
-              (.blacklistHost cluster host))
-          (doseq [[slot top-id _] assignments]
-            (when (contains? iso-ids-set top-id)
-              (.freeSlot cluster slot)
+        (if (and (contains? iso-ids-set top-id);;如果隔离topology包含这个topology
+                 (every? #(= (second %) top-id) assignments);;并且当前部署的assignment都属于这个topology
+                 (contains? distribution num-workers);;理想部署情况中包含当前部署的worker
+                 (every? #(contains? worker-specs (nth % 2)) assignments));;executor也满足理想分配
+          ;;这些条件都符合则进行一下操作：
+          (do (decrement-distribution! distribution num-workers);;如果满足从理想部署情况，则把num-workers减1
+              (doseq [[_ _ executors] assignments] (.remove worker-specs executors));;从worker-specs中把理想部署情况的executor去除
+              (.blacklistHost cluster host));;把host加入blacklist，不会对这台机器做任何新任务的分配
+          ;;如果不满足条件
+          (doseq [[slot top-id _] assignments];;便利这台机器上的所有topology
+            (when (contains? iso-ids-set top-id);;如果topology不属于隔离的
+              (.freeSlot cluster slot);;释放这个slot
               ))
           )))
     
-    (let [host->used-slots (host->used-slots cluster)
-          ^LinkedList sorted-assignable-hosts (host-assignable-slots cluster)]
+    (let [host->used-slots (host->used-slots cluster);;host对used-slot的映射
+          ^LinkedList sorted-assignable-hosts (host-assignable-slots cluster)];;可用的host对slot的映射
       ;; TODO: can improve things further by ordering topologies in terms of who needs the least workers
       (doseq [[top-id worker-specs] topology-worker-specs
-              :let [amts (distribution->sorted-amts (get topology-machine-distribution top-id))]]
-        (doseq [amt amts
-                :let [[host host-slots] (.peek sorted-assignable-hosts)]]
-          (when (and host-slots (>= (count host-slots) amt))
-            (.poll sorted-assignable-hosts)
-            (.freeSlots cluster (get host->used-slots host))
-            (doseq [slot (take amt host-slots)
-                    :let [executors-set (remove-elem-from-set! worker-specs)]]
-              (.assign cluster slot top-id executors-set))
-            (.blacklistHost cluster host))
+              :let [amts (distribution->sorted-amts (get topology-machine-distribution top-id))]];;从理想配置中选出隔离的topID对应的Worker并按降序排列
+        (doseq [amt amts;;从worker中选择一个
+                :let [[host host-slots] (.peek sorted-assignable-hosts)]];;从可用的host中查找第一个
+          (when (and host-slots (>= (count host-slots) amt));;如果可用的host-slot存在，并且数量大于理想中topology需要的worker数
+            (.poll sorted-assignable-hosts);;从可用的host中取出第一个
+            (.freeSlots cluster (get host->used-slots host));;从cluster中释放这个host对应的slot
+            (doseq [slot (take amt host-slots);;获取slot
+                    :let [executors-set (remove-elem-from-set! worker-specs)]];;获取executor
+              (.assign cluster slot top-id executors-set));;在cluster中设置topology对应的slot和executor
+            (.blacklistHost cluster host));;黑名单中去掉这个host
           )))
     
     (let [failed-iso-topologies (->> topology-worker-specs
                                   (mapcat (fn [[top-id worker-specs]]
                                     (if-not (empty? worker-specs) [top-id])
-                                    )))]
-      (if (empty? failed-iso-topologies)
+                                    )))];;得到隔离的topology中没有被分配完的topology
+      (if (empty? failed-iso-topologies);;如果未被分配的隔离top为空
         ;; run default scheduler on non-isolated topologies
         (-<> topology-worker-specs
              allocated-topologies
              (leftover-topologies topologies <>)
-             (DefaultScheduler/default-schedule <> cluster))
+             (DefaultScheduler/default-schedule <> cluster));;所有topology中除去隔离的topology，其他的使用DefaultScheduler进行资源分配
+        ;;如果有未被分配的隔离top为空
         (do
           (log-warn "Unable to isolate topologies " (pr-str failed-iso-topologies) ". No machine had enough worker slots to run the remaining workers for these topologies. Clearing all other resources and will wait for enough resources for isolated topologies before allocating any other resources.")
           ;; clear workers off all hosts that are not blacklisted
           (doseq [[host slots] (host->used-slots cluster)]
             (if-not (.isBlacklistedHost cluster host)
               (.freeSlots cluster slots)
-              )))
+              )));;释放所有不在blacklist中的host的slot，为下一次资源调度做准备
         ))
-    (.setBlacklistedHosts cluster orig-blacklist)
+    (.setBlacklistedHosts cluster orig-blacklist);;把blacklist恢复到未被分配前的状态
     ))
