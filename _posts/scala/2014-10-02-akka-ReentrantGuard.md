@@ -25,7 +25,7 @@ ReentrantGuard实现代码就不用解释了。
 	private val lock = new ReentrantGuard
 	
 	lock withGuard {
-	  doSometing	
+	  doSomething	
 	}	
 	
 这多自然！	
